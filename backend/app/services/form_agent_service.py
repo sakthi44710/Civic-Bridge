@@ -151,6 +151,8 @@ class FormFillingSession:
         self._last_user_text = ""
         self._last_assistant_text = ""
         self._processing = False
+        self._extract_task: Optional[asyncio.Task] = None  # background extraction
+        self._screenshot_task: Optional[asyncio.Task] = None  # periodic screenshot
 
     async def start(self, user_data: dict = None) -> Dict:
         """Initialize the form-filling session."""
@@ -197,15 +199,48 @@ class FormFillingSession:
         if self.on_update:
             await self.on_update(initial_update)
 
+        # Start periodic screenshot refresh (every 3 s) for live projection
+        self._screenshot_task = asyncio.ensure_future(self._periodic_screenshot())
+
         logger.info(f"Form session started: {self.session_id}, scheme={self.scheme_id}, "
                     f"fields={self.total_fields}, prefilled={len(self.collected_fields)}")
 
         return initial_update
 
+    async def _periodic_screenshot(self, interval: float = 3.0):
+        """Send a fresh browser screenshot every `interval` seconds so the
+        frontend shows a truly live view, even between field fills."""
+        try:
+            while self._running:
+                await asyncio.sleep(interval)
+                if not self._running or not self._page or not PLAYWRIGHT_AVAILABLE:
+                    break
+                try:
+                    shot = await self._page.screenshot(full_page=False, type="png")
+                    b64 = base64.b64encode(shot).decode("utf-8")
+                    if self.on_update:
+                        await self.on_update({
+                            "type": "form_update",
+                            "data": {
+                                "session_id": self.session_id,
+                                "status": self.waiting_for or "filling",
+                                "screenshot_base64": b64,
+                                "fields_filled": len(self.collected_fields),
+                                "total_fields": self.total_fields,
+                                "filled_fields": self.collected_fields,
+                                "newly_filled": [],
+                                "timestamp": now_iso(),
+                            }
+                        })
+                except Exception:
+                    pass  # page may have closed
+        except asyncio.CancelledError:
+            pass
+
     async def on_conversation_text(self, role: str, text: str):
         """
-        Called when new conversation text arrives from Nova Sonic.
-        Extracts form-relevant data and fills fields.
+        Called when new conversation text arrives (user or assistant).
+        Kicks off background extraction so the voice pipeline is never blocked.
         """
         if not self._running or not text.strip():
             return
@@ -215,18 +250,27 @@ class FormFillingSession:
         elif role == "assistant":
             self._last_assistant_text = text
 
-        # Only process when we have both user and assistant text
-        # (or just user text for immediate extraction)
-        if role == "user" and not self._processing:
-            # If browser is waiting for OTP/CAPTCHA input, skip conversation extraction
-            if self.waiting_for:
-                logger.info(f"[FormAgent] Skipping extraction — waiting for {self.waiting_for}")
-                return
-            self._processing = True
-            try:
-                await self._extract_and_fill(text, self._last_assistant_text)
-            finally:
-                self._processing = False
+        # Trigger extraction on BOTH user and assistant messages
+        # — user text contains raw data, assistant text confirms/asks for fields.
+        if self.waiting_for:
+            logger.info(f"[FormAgent] Skipping extraction — waiting for {self.waiting_for}")
+            return
+
+        if self._processing:
+            return  # previous extraction still running — will catch up on next message
+
+        # Run extraction in background so it never blocks the voice response
+        self._extract_task = asyncio.ensure_future(self._bg_extract())
+
+    async def _bg_extract(self):
+        """Background wrapper for extract_and_fill — never blocks the caller."""
+        self._processing = True
+        try:
+            await self._extract_and_fill(self._last_user_text, self._last_assistant_text)
+        except Exception as e:
+            logger.warning(f"Background extraction error: {e}")
+        finally:
+            self._processing = False
 
     async def _extract_and_fill(self, user_text: str, assistant_text: str):
         """Extract field data from conversation and fill the form."""
@@ -620,6 +664,10 @@ class FormFillingSession:
     async def close(self):
         """Close the browser and clean up."""
         self._running = False
+        # Cancel background tasks
+        for task in (self._extract_task, self._screenshot_task):
+            if task and not task.done():
+                task.cancel()
         try:
             if self._page:
                 await self._page.close()
@@ -762,6 +810,27 @@ class FormFillingSession:
             {"field_name": "education", "label": "Education Level", "type": "select",
              "selector": "#education", "description": "Highest qualification"},
         ]
+
+    def get_missing_fields(self) -> list:
+        """Return a list of field labels that have NOT been filled yet.
+        Used by the voice AI to know which questions to ask the user."""
+        filled = set(self.collected_fields.keys())
+        missing = []
+        for f in self.required_fields:
+            name = f.get("field_name") or f.get("name", "")
+            if name and name not in filled:
+                missing.append(f.get("label", name))
+        return missing
+
+    def get_filled_fields(self) -> list:
+        """Return labels of fields already filled."""
+        filled = set(self.collected_fields.keys())
+        result = []
+        for f in self.required_fields:
+            name = f.get("field_name") or f.get("name", "")
+            if name in filled:
+                result.append(f.get("label", name))
+        return result
 
     def _generate_simulation_screenshot(self, field_names: list) -> str:
         """Generate a text-based simulation when Playwright is not available.

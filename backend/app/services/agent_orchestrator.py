@@ -66,6 +66,7 @@ class AgentOrchestrator:
         language: str = "en",
         conversation_id: str = None,
         document_context: str = "",
+        form_context: str = "",
     ) -> Dict:
         """
         Process user message. Searches the web for relevant schemes/scholarships
@@ -107,6 +108,7 @@ class AgentOrchestrator:
             user_message, conversation_history, user_profile, language,
             web_search_context=search_context,
             document_context=document_context,
+            form_context=form_context,
         )
 
         intent = convo_result.get("intent", "general_help")
@@ -221,6 +223,7 @@ class AgentOrchestrator:
         language: str,
         web_search_context: str = "",
         document_context: str = "",
+        form_context: str = "",
     ) -> Dict:
         """
         Primary conversational agent. Uses Llama 3 70B.
@@ -233,6 +236,7 @@ class AgentOrchestrator:
             language=language,
             web_search_context=web_search_context,
             document_context=document_context,
+            form_context=form_context,
         )
 
     # ================================================================

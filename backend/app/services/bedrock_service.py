@@ -273,8 +273,9 @@ class BedrockService:
     def chat(self, user_message: str, conversation_history: List[Dict] = None,
              user_profile: Dict = None, language: str = "en",
              web_search_context: str = "",
-             document_context: str = "") -> Dict:
-        """Conversational AI using Llama 3 70B. Accepts web search context and user document context."""
+             document_context: str = "",
+             form_context: str = "") -> Dict:
+        """Conversational AI using Llama 3 70B. Accepts web search context, user document context, and form context."""
         messages = []
 
         if conversation_history:
@@ -291,6 +292,8 @@ class BedrockService:
             context += f"\n\n{document_context}"
         if web_search_context:
             context += f"\n\n[Web Search Results — use these to answer the user's question accurately:]\n{web_search_context}"
+        if form_context:
+            context += f"\n\n{form_context}"
 
         full_message = user_message + context if context else user_message
         messages.append({

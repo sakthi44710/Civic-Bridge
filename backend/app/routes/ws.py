@@ -308,9 +308,12 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
         "text": text,
     })
 
-    # Feed to form agent
+    # Feed to form agent (background — does not block AI response)
     if state.get("form_session"):
         await state["form_session"].on_conversation_text("user", text)
+
+    # Build form context so the AI knows which fields to ask about
+    form_context = _build_form_context(state)
 
     # Process through conversation agent
     try:
@@ -321,6 +324,7 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             language=state.get("language", "en"),
             conversation_id=state.get("conversation_id"),
             document_context=state.get("document_context", ""),
+            form_context=form_context,
         )
 
         ai_response = ai_result.get("message", str(ai_result)) if isinstance(ai_result, dict) else str(ai_result)
@@ -337,15 +341,16 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             await state["form_session"].on_conversation_text("assistant", ai_response)
 
         # Check if we should start form filling
-        if isinstance(ai_result, dict) and not state.get("form_session"):
-            intent = ai_result.get("intent", "")
-            schemes = ai_result.get("suggested_schemes", [])
-            # Auto-start form agent when the AI suggests specific schemes
-            # (not just application_start — also when user asks about a scheme)
-            if schemes and intent in ("application_start", "scheme_inquiry",
-                                      "eligibility_check", "application_help"):
-                state["scheme_id"] = schemes[0]
+        if not state.get("form_session"):
+            should_start, scheme_id = _should_start_form(text, ai_result, state)
+            if should_start:
+                state["scheme_id"] = scheme_id
                 await _start_form_agent(websocket, state)
+                await websocket.send_json({
+                    "type": "form_started",
+                    "scheme_id": scheme_id,
+                    "session_id": state["form_session"].session_id if state.get("form_session") else None,
+                })
 
             # Send form update if present
             form_update = ai_result.get("form_update")
@@ -451,6 +456,7 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
             await state["form_session"].on_conversation_text("user", text)
 
         # ── 3. AI response via Bedrock ─────────────────
+        form_context = _build_form_context(state)
         try:
             ai_result = await orchestrator.process(
                 user_message=text,
@@ -459,6 +465,7 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
                 language=state.get("language", "en"),
                 conversation_id=state.get("conversation_id"),
                 document_context=state.get("document_context", ""),
+                form_context=form_context,
             )
             ai_response = (
                 ai_result.get("message", str(ai_result))
@@ -474,14 +481,17 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
         if state.get("form_session"):
             await state["form_session"].on_conversation_text("assistant", ai_response)
 
-        # Auto-start form agent when schemes are suggested (same logic as text path)
-        if isinstance(ai_result, dict) and not state.get("form_session"):
-            intent = ai_result.get("intent", "")
-            schemes = ai_result.get("suggested_schemes", [])
-            if schemes and intent in ("application_start", "scheme_inquiry",
-                                      "eligibility_check", "application_help"):
-                state["scheme_id"] = schemes[0]
+        # Auto-start form agent when schemes are suggested
+        if not state.get("form_session"):
+            should_start, scheme_id = _should_start_form(text, ai_result, state)
+            if should_start:
+                state["scheme_id"] = scheme_id
                 await _start_form_agent(websocket, state)
+                await websocket.send_json({
+                    "type": "form_started",
+                    "scheme_id": scheme_id,
+                    "session_id": state["form_session"].session_id if state.get("form_session") else None,
+                })
 
         # ── 5. TTS via Polly (clean spoken text only) ──
         try:
@@ -645,6 +655,78 @@ async def _stream_nova_output(websocket: WebSocket, state: dict,
 # ═══════════════════════════════════════════════════════════
 # Form Agent
 # ═══════════════════════════════════════════════════════════
+
+def _build_form_context(state: dict) -> str:
+    """Build a context string telling the AI about form-filling status.
+    This lets the conversational AI naturally ask the user for missing fields
+    without the AI itself doing the filling — the separate form agent fills."""
+    form_session: FormFillingSession = state.get("form_session")
+    if not form_session or not form_session._running:
+        return ""
+
+    missing = form_session.get_missing_fields()
+    filled = form_session.get_filled_fields()
+
+    if not missing:
+        return (
+            "[FORM STATUS: A background agent is filling the application form. "
+            "All fields are complete! Let the user know the form is ready for review/submission.]"
+        )
+
+    parts = [
+        "[FORM STATUS: A separate form-filling agent is filling the application form "
+        "in real-time based on this conversation. You do NOT fill the form yourself — "
+        "just have a natural conversation and ask the user for the information below.",
+    ]
+    if filled:
+        parts.append(f"Already filled: {', '.join(filled)}.")
+    parts.append(f"Still needed: {', '.join(missing)}.")
+    parts.append(
+        "Ask for 1-2 missing fields at a time in a conversational, friendly way. "
+        "Do NOT list all fields at once. The form agent will pick up the data automatically.]"
+    )
+    return " ".join(parts)
+
+
+# Patterns that indicate the user wants to start filling a form
+_FORM_START_PATTERNS = re.compile(
+    r'(?:fill|start|begin|open|launch)\s*(?:the\s+)?(?:form|application)|'
+    r'(?:apply|register)\s*(?:now|for|online)|'
+    r'(?:i\s+want\s+to\s+apply)|'
+    r'(?:help\s+me\s+(?:fill|apply))|'
+    r'(?:start\s+(?:my\s+)?application)|'
+    r'(?:form\s+(?:bhar|bharo|shuru))',  # Hindi transliterations
+    re.IGNORECASE,
+)
+
+
+def _should_start_form(user_text: str, ai_result, state: dict) -> tuple:
+    """Decide whether to auto-start the form agent.
+    Returns (should_start: bool, scheme_id: str)."""
+    scheme_id = state.get("scheme_id")
+
+    # 1. AI returned a matching intent + scheme
+    if isinstance(ai_result, dict):
+        intent = ai_result.get("intent", "")
+        schemes = ai_result.get("suggested_schemes", [])
+        if schemes and intent in ("application_start", "scheme_inquiry",
+                                  "eligibility_check", "application_help"):
+            return True, schemes[0]
+
+    # 2. User explicitly asked to fill a form
+    if _FORM_START_PATTERNS.search(user_text):
+        # Use first suggested scheme, or the scheme from state, or generic
+        if isinstance(ai_result, dict):
+            schemes = ai_result.get("suggested_schemes", [])
+            if schemes:
+                return True, schemes[0]
+        if scheme_id:
+            return True, scheme_id
+        # Start with generic form template
+        return True, "generic_application"
+
+    return False, ""
+
 
 async def _start_form_agent(websocket: WebSocket, state: dict):
     """Start the live form-filling agent."""
