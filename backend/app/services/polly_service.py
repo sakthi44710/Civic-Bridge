@@ -9,24 +9,28 @@ from app.services.aws_clients import aws
 
 logger = logging.getLogger(__name__)
 
-# Polly voice mapping for Indian languages
+# Polly (Kajal neural) natively supports: en-IN, hi-IN, te-IN, bn-IN, mr-IN, gu-IN, kn-IN, ml-IN
+# All other Indian languages fall back to hi-IN (Kajal still produces intelligible Indian TTS)
+_KAJAL = {"voice_id": "Kajal", "engine": "neural"}
 POLLY_VOICES = {
-    "en": {"voice_id": "Kajal", "engine": "neural"},
-    "hi": {"voice_id": "Kajal", "engine": "neural"},
-    "ta": {"voice_id": "Kajal", "engine": "neural"},  # Fallback
-    "te": {"voice_id": "Kajal", "engine": "neural"},
-    "bn": {"voice_id": "Kajal", "engine": "neural"},
-    "mr": {"voice_id": "Kajal", "engine": "neural"},
-    "gu": {"voice_id": "Kajal", "engine": "neural"},
-    "kn": {"voice_id": "Kajal", "engine": "neural"},
-    "ml": {"voice_id": "Kajal", "engine": "neural"},
+    "en": _KAJAL, "hi": _KAJAL, "ta": _KAJAL, "te": _KAJAL,
+    "bn": _KAJAL, "mr": _KAJAL, "gu": _KAJAL, "kn": _KAJAL, "ml": _KAJAL,
+    "pa": _KAJAL, "or": _KAJAL, "as": _KAJAL, "ur": _KAJAL,
+    "mai": _KAJAL, "kok": _KAJAL, "ne": _KAJAL, "sd": _KAJAL,
+    "ks": _KAJAL, "doi": _KAJAL, "mni": _KAJAL, "sat": _KAJAL,
+    "brx": _KAJAL, "sa": _KAJAL,
 }
 
-# Language codes for SSML
+# SSML lang codes — unmapped languages fall back to hi-IN to avoid Polly errors
 POLLY_LANGUAGE_CODES = {
     "en": "en-IN", "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
     "bn": "bn-IN", "mr": "mr-IN", "gu": "gu-IN", "kn": "kn-IN",
-    "ml": "ml-IN",
+    "ml": "ml-IN", "pa": "hi-IN",  # pa-IN not in Kajal — use hi-IN
+    # Remaining 8th Schedule: all fall back to hi-IN
+    "or": "hi-IN", "as": "hi-IN", "ur": "hi-IN", "mai": "hi-IN",
+    "kok": "hi-IN", "ne": "hi-IN", "sd": "hi-IN", "ks": "hi-IN",
+    "doi": "hi-IN", "mni": "hi-IN", "sat": "hi-IN", "brx": "hi-IN",
+    "sa": "hi-IN",
 }
 
 

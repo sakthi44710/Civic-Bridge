@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useLanguageStore, useAuthStore } from '../store';
 
+// All 22 official Indian languages (8th Schedule) + English
 const LANGUAGES = [
   { code: 'hi', name: 'हिन्दी', english: 'Hindi' },
   { code: 'en', name: 'English', english: 'English' },
@@ -16,9 +17,16 @@ const LANGUAGES = [
   { code: 'or', name: 'ଓଡ଼ିଆ', english: 'Odia' },
   { code: 'as', name: 'অসমীয়া', english: 'Assamese' },
   { code: 'ur', name: 'اردو', english: 'Urdu' },
-  { code: 'sa', name: 'संस्कृतम्', english: 'Sanskrit' },
+  { code: 'mai', name: 'मैथिली', english: 'Maithili' },
+  { code: 'kok', name: 'कोंकणी', english: 'Konkani' },
   { code: 'ne', name: 'नेपाली', english: 'Nepali' },
   { code: 'sd', name: 'سنڌي', english: 'Sindhi' },
+  { code: 'ks', name: 'کٲشُر', english: 'Kashmiri' },
+  { code: 'doi', name: 'डोगरी', english: 'Dogri' },
+  { code: 'mni', name: 'মৈতৈলোন্', english: 'Manipuri' },
+  { code: 'sat', name: 'ᱥᱟᱱᱛᱟᱲᱤ', english: 'Santali' },
+  { code: 'brx', name: 'बर\'', english: 'Bodo' },
+  { code: 'sa', name: 'संस्कृतम्', english: 'Sanskrit' },
 ];
 
 export default function LanguageSelect() {

@@ -68,10 +68,34 @@ Do NOT use markdown, bullet points, or long lists in your speech.
 Speak naturally as if on a phone call."""
 
 # Language code mapping for Nova Sonic
+# Nova Sonic natively supports: en-US, hi-IN, ta-IN, te-IN, bn-IN, mr-IN, gu-IN, kn-IN, ml-IN, pa-IN
+# All other Indian languages fall back to the closest supported locale
 NOVA_SONIC_LANGUAGES = {
-    "en": "en-US", "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
-    "bn": "bn-IN", "mr": "mr-IN", "gu": "gu-IN", "kn": "kn-IN",
-    "ml": "ml-IN", "pa": "pa-IN",
+    # Natively supported
+    "en": "en-US",
+    "hi": "hi-IN",
+    "ta": "ta-IN",
+    "te": "te-IN",
+    "bn": "bn-IN",
+    "mr": "mr-IN",
+    "gu": "gu-IN",
+    "kn": "kn-IN",
+    "ml": "ml-IN",
+    "pa": "pa-IN",
+    # Fallbacks for remaining 8th Schedule languages
+    "or": "hi-IN",   # Odia → Hindi (similar Devanagari region)
+    "as": "bn-IN",   # Assamese → Bengali (closely related)
+    "ur": "hi-IN",   # Urdu → Hindi (same spoken language)
+    "mai": "hi-IN",  # Maithili → Hindi
+    "kok": "mr-IN",  # Konkani → Marathi (same region)
+    "ne": "hi-IN",   # Nepali → Hindi
+    "sd": "hi-IN",   # Sindhi → Hindi
+    "ks": "hi-IN",   # Kashmiri → Hindi
+    "doi": "hi-IN",  # Dogri → Hindi
+    "mni": "bn-IN",  # Manipuri → Bengali (Northeast India)
+    "sat": "hi-IN",  # Santali → Hindi
+    "brx": "hi-IN",  # Bodo → Hindi (Northeast India)
+    "sa": "hi-IN",   # Sanskrit → Hindi
 }
 
 
