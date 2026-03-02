@@ -26,6 +26,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import struct
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
@@ -335,14 +336,16 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
         # Synthesize speech for the AI response (fallback TTS)
         if not state.get("nova_session"):
             try:
-                tts_result = polly_service.synthesize(ai_response, state.get("language", "en"))
-                audio_b64 = tts_result.get("audio_base64", "")
-                if audio_b64:
-                    await websocket.send_json({
-                        "type": "audio_chunk",
-                        "data": audio_b64,
-                        "format": "mp3",
-                    })
+                spoken = _make_tts_text(ai_response)
+                if spoken:
+                    tts_result = polly_service.synthesize(spoken, state.get("language", "en"))
+                    audio_b64 = tts_result.get("audio_base64", "")
+                    if audio_b64:
+                        await websocket.send_json({
+                            "type": "audio_chunk",
+                            "data": audio_b64,
+                            "format": "mp3",
+                        })
             except Exception:
                 pass
 
@@ -441,19 +444,21 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
         if state.get("form_session"):
             await state["form_session"].on_conversation_text("assistant", ai_response)
 
-        # ── 5. TTS via Polly ────────────────────────
+        # ── 5. TTS via Polly (clean spoken text only) ──
         try:
-            tts = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: polly_service.synthesize(ai_response, state.get("language", "en"))
-            )
-            audio_out = tts.get("audio_base64", "")
-            if audio_out:
-                await websocket.send_json({
-                    "type": "audio_chunk",
-                    "data": audio_out,
-                    "format": "mp3",
-                })
+            spoken = _make_tts_text(ai_response)
+            if spoken:
+                tts = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: polly_service.synthesize(spoken, state.get("language", "en"))
+                )
+                audio_out = tts.get("audio_base64", "")
+                if audio_out:
+                    await websocket.send_json({
+                        "type": "audio_chunk",
+                        "data": audio_out,
+                        "format": "mp3",
+                    })
         except Exception as e:
             logger.warning(f"TTS error: {e}")
 
@@ -473,6 +478,35 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
             await websocket.send_json({"type": "status", "status": "listening"})
         except Exception:
             pass
+
+
+def _make_tts_text(message: str, max_sentences: int = 3) -> str:
+    """
+    Convert an AI markdown message to a clean, spoken-friendly string.
+    - Strips markdown formatting (**, ##, bullets, links)
+    - Strips leaked metadata (Intent:, Suggested Actions:, etc.)
+    - Returns at most max_sentences sentences so speech stays crisp
+    """
+    if not message:
+        return ""
+    text = message
+    # Remove leaked metadata lines
+    text = re.sub(r'\*{0,2}(Suggested Actions|Suggested Schemes|Intent|Detected Language|Requires Info)\*{0,2}\s*[:\[].*', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[\{"type".*?\}\]', '', text, flags=re.DOTALL)
+    # Strip markdown: headers, bold/italic, code, horizontal rules, bullet markers
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)   # headers
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)      # bold/italic
+    text = re.sub(r'`[^`]*`', '', text)                         # inline code
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)       # links → label
+    text = re.sub(r'^[-*>|] *', '', text, flags=re.MULTILINE)   # bullets / blockquote
+    text = re.sub(r'^\d+\.\s+', '', text, flags=re.MULTILINE)   # numbered list markers
+    text = re.sub(r'\n+', ' ', text)                             # flatten newlines
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    # Split into sentences and take first max_sentences
+    sentence_endings = re.compile(r'(?<=[.!?])\s+')
+    sentences = [s.strip() for s in sentence_endings.split(text) if s.strip()]
+    spoken = ' '.join(sentences[:max_sentences])
+    return spoken
 
 
 def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 16000,

@@ -72,6 +72,7 @@ export default function useNovaSonicCall({
   const schemeIdRef = useRef(schemeId);
   const recognitionRef = useRef(null);  // Web Speech API recognition instance
   const volAnimRef = useRef(null);       // requestAnimationFrame handle for volume
+  const currentAudioRef = useRef(null); // currently-playing MP3 Audio element
 
   // Keep refs in sync
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
@@ -461,6 +462,12 @@ export default function useNovaSonicCall({
   // ─── Play MP3 audio (fallback TTS) ─────────────────
   const playMP3Audio = useCallback((base64) => {
     try {
+      // Stop whatever is currently speaking before starting the new audio
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current.src = '';
+        currentAudioRef.current = null;
+      }
       onStatusChange?.('speaking');
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
@@ -473,8 +480,15 @@ export default function useNovaSonicCall({
       audio.src = url;
       audio.onended = () => {
         URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
         onStatusChange?.('listening');
       };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+        onStatusChange?.('listening');
+      };
+      currentAudioRef.current = audio;
       audio.play();
     } catch (e) {
       console.error('MP3 playback error:', e);
@@ -483,6 +497,12 @@ export default function useNovaSonicCall({
 
   // ─── Stop all playback ─────────────────────────────
   const stopPlayback = useCallback(() => {
+    // Stop the current MP3 audio element
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current.src = '';
+      currentAudioRef.current = null;
+    }
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
     if (playbackContextRef.current) {

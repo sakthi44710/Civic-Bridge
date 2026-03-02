@@ -7,6 +7,7 @@ Uses the universal Converse API (works with all Bedrock models).
 """
 import json
 import logging
+import re
 from typing import Dict, List, Optional
 from botocore.exceptions import ClientError
 from app.services.aws_clients import aws
@@ -32,7 +33,8 @@ Key rules:
 - Be empathetic and patient - many users have low digital literacy
 - Use simple, clear language
 - Support code-mixing (Hinglish, Tanglish, etc.)
-- Always provide actionable next steps
+- IMPORTANT: Answer the user's ACTUAL question first. If they ask a general question (e.g. "do you know Tamil?", "what's your name?", "how are you?"), answer it directly and naturally. Do NOT pivot to scheme recommendations unless the user is asking about schemes.
+- Only suggest schemes when the user is clearly asking about welfare, scholarships, benefits, or applications.
 - Never ask for sensitive info like passwords or OTPs in chat
 - When unsure about eligibility, err on the side of inclusion
 - When the user asks for a list of schemes, scholarships, or options, ALWAYS provide a COMPLETE numbered list with details for EACH item
@@ -42,10 +44,14 @@ Key rules:
 - If the user's document data is provided (Aadhaar, PAN, etc.), USE IT to auto-fill information, confirm eligibility, and avoid asking for data you already have
 - Include source URLs when available so users can verify information
 
-When the user describes their need, identify the intent and respond with relevant scheme suggestions.
+CRITICAL JSON RULES:
+- The "message" field must contain ONLY the human-readable response text. It must NEVER include any of these words: "Intent:", "Detected Language:", "Suggested Actions:", "Suggested Schemes:", "requires_info:". Those belong in their OWN separate JSON fields.
+- Do NOT repeat or summarize the JSON structure inside the message field.
+- The message field is what gets shown to and spoken to the user — keep it clean.
+
 Always respond in JSON format with these fields:
 {
-    "message": "Your detailed response text to the user using markdown formatting",
+    "message": "Your response text to the user. Clean text only — no metadata.",
     "intent": "one of: greeting, scheme_discovery, eligibility_check, document_help, application_start, application_status, general_help",
     "detected_language": "language code (en, hi, ta, te, bn, etc.)",
     "suggested_schemes": ["scheme_name_1", "scheme_name_2"],
@@ -208,7 +214,7 @@ class BedrockService:
         return None
 
     def _clean_message_text(self, text: str) -> str:
-        """Strip trailing JSON blocks and cleanup artifacts from model output."""
+        """Strip trailing JSON blocks and leaked metadata artifacts from model output."""
         clean = text.strip()
         # Find and remove trailing JSON object
         depth = 0
@@ -229,6 +235,16 @@ class BedrockService:
             before = clean[:json_start].strip()
             if len(before) > 20:
                 clean = before
+        # Strip leaked metadata lines the model sometimes appends inside message
+        clean = re.sub(r'\*{0,2}Suggested Actions:\*{0,2}\s*\[.*?\]', '', clean, flags=re.DOTALL)
+        clean = re.sub(r'\*{0,2}Suggested Schemes:\*{0,2}\s*\[.*?\]', '', clean, flags=re.DOTALL)
+        clean = re.sub(r'\*{0,2}Requires Info:\*{0,2}\s*\[.*?\]', '', clean, flags=re.DOTALL)
+        clean = re.sub(r'\*{0,2}Intent:\*{0,2}\s*\S+', '', clean)
+        clean = re.sub(r'\*{0,2}Detected Language:\*{0,2}\s*\S+', '', clean)
+        # Remove any remaining raw JSON arrays/objects that slipped through
+        clean = re.sub(r'\[\{"type".*?\}\]', '', clean, flags=re.DOTALL)
+        # Collapse multiple blank lines into one
+        clean = re.sub(r'\n{3,}', '\n\n', clean)
         return clean.strip()
 
     # ============================================================
@@ -298,11 +314,10 @@ class BedrockService:
                                 system=system_prompt, max_tokens=2048)
             parsed = self._parse_json(text)
             if parsed and "message" in parsed:
-                # Ensure the message doesn't contain raw JSON artifacts
+                # Always clean the message field — removes leaked metadata/JSON
                 msg = parsed["message"]
-                if msg and "{" in msg and '"intent"' in msg:
-                    msg = self._clean_message_text(msg)
-                    parsed["message"] = msg
+                if msg:
+                    parsed["message"] = self._clean_message_text(msg)
                 return parsed
             # JSON parsing failed — strip any trailing JSON from raw text
             clean_text = self._clean_message_text(text)
