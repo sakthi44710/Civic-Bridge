@@ -1,7 +1,12 @@
 """
 AWS Textract Service - Document OCR
+
+Supports: JPEG, PNG, TIFF (sync), PDF (sync single-page, async multi-page),
+BMP / WebP / other formats auto-converted to PNG via Pillow.
 """
+import io
 import logging
+import time
 from typing import Dict, List
 from botocore.exceptions import ClientError
 from app.services.aws_clients import aws
@@ -9,46 +14,140 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ---------------- format helpers ----------------
+
+def _ensure_textract_compatible(file_bytes: bytes) -> bytes:
+    """Convert BMP/WebP/other image formats to PNG so Textract can read them.
+    Returns the original bytes if already JPEG/PNG/TIFF/PDF."""
+    # Quick header checks for natively-supported formats
+    if file_bytes[:4] == b'%PDF':
+        return file_bytes
+    if file_bytes[:2] == b'\xff\xd8':          # JPEG
+        return file_bytes
+    if file_bytes[:8] == b'\x89PNG\r\n\x1a\n': # PNG
+        return file_bytes
+    if file_bytes[:4] in (b'II\x2a\x00', b'MM\x00\x2a'):  # TIFF
+        return file_bytes
+
+    # Anything else — convert to PNG via Pillow
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        logger.info("Converted image (%s) to PNG for Textract", img.format or "unknown")
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning("Image conversion failed (%s), sending original bytes to Textract", e)
+        return file_bytes
+
 
 class TextractService:
     """AWS Textract for document OCR and data extraction"""
     
     def __init__(self):
         self.client = aws.textract()
+        self.s3 = aws.s3()
     
-    def extract_text(self, file_bytes: bytes) -> Dict:
-        """Extract text from document image/PDF"""
+    def extract_text(self, file_bytes: bytes, filename: str = "") -> Dict:
+        """Extract text from document image/PDF.
+        Auto-converts unsupported image formats to PNG.
+        Falls back to async S3-based API for multi-page PDFs."""
+        file_bytes = _ensure_textract_compatible(file_bytes)
+        is_pdf = file_bytes[:4] == b'%PDF'
+
         try:
-            response = self.client.detect_document_text(
-                Document={"Bytes": file_bytes}
-            )
-            
-            lines = []
-            words = []
-            confidence_scores = []
-            
-            for block in response.get("Blocks", []):
-                if block["BlockType"] == "LINE":
-                    lines.append(block["Text"])
-                    confidence_scores.append(block["Confidence"])
-                elif block["BlockType"] == "WORD":
-                    words.append(block["Text"])
-            
-            avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
-            
-            return {
-                "full_text": "\n".join(lines),
-                "lines": lines,
-                "words": words,
-                "confidence": round(avg_confidence, 2),
-                "block_count": len(response.get("Blocks", []))
-            }
+            return self._sync_detect(file_bytes)
         except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if is_pdf and code in ("UnsupportedDocumentException", "InvalidParameterException"):
+                logger.info("Sync Textract failed for PDF — trying async S3-based extraction")
+                return self._async_detect_pdf(file_bytes)
             logger.error(f"Textract detect_document_text error: {e}")
             raise
+        except Exception as e:
+            logger.error(f"Textract extract_text error: {e}")
+            raise
+
+    # ---------- sync single-page ----------
+
+    def _sync_detect(self, file_bytes: bytes) -> Dict:
+        """Synchronous single-page detection (JPEG/PNG/TIFF/single-page PDF)."""
+        response = self.client.detect_document_text(
+            Document={"Bytes": file_bytes}
+        )
+        return self._parse_blocks(response.get("Blocks", []))
+
+    # ---------- async multi-page PDF ----------
+
+    def _async_detect_pdf(self, pdf_bytes: bytes) -> Dict:
+        """Async multi-page PDF detection via S3."""
+        key = f"textract-tmp/{int(time.time() * 1000)}.pdf"
+        bucket = settings.DOCUMENTS_BUCKET
+        try:
+            self.s3.put_object(Bucket=bucket, Key=key, Body=pdf_bytes,
+                               ContentType="application/pdf")
+            resp = self.client.start_document_text_detection(
+                DocumentLocation={"S3Object": {"Bucket": bucket, "Name": key}}
+            )
+            job_id = resp["JobId"]
+
+            for _ in range(120):
+                status = self.client.get_document_text_detection(JobId=job_id)
+                job_status = status["JobStatus"]
+                if job_status == "SUCCEEDED":
+                    blocks = status.get("Blocks", [])
+                    next_token = status.get("NextToken")
+                    while next_token:
+                        more = self.client.get_document_text_detection(
+                            JobId=job_id, NextToken=next_token)
+                        blocks.extend(more.get("Blocks", []))
+                        next_token = more.get("NextToken")
+                    return self._parse_blocks(blocks)
+                elif job_status == "FAILED":
+                    logger.error("Async Textract job failed: %s",
+                                 status.get("StatusMessage", "unknown"))
+                    return {"full_text": "", "lines": [], "words": [],
+                            "confidence": 0, "block_count": 0}
+                time.sleep(1)
+
+            logger.error("Async Textract job timed out (120 s)")
+            return {"full_text": "", "lines": [], "words": [],
+                    "confidence": 0, "block_count": 0}
+        finally:
+            try:
+                self.s3.delete_object(Bucket=bucket, Key=key)
+            except Exception:
+                pass
+
+    # ---------- helpers ----------
+
+    @staticmethod
+    def _parse_blocks(blocks: list) -> Dict:
+        """Parse Textract blocks into structured result."""
+        lines, words, confidence_scores = [], [], []
+        for block in blocks:
+            bt = block.get("BlockType")
+            if bt == "LINE":
+                lines.append(block["Text"])
+                confidence_scores.append(block["Confidence"])
+            elif bt == "WORD":
+                words.append(block["Text"])
+        avg_conf = (sum(confidence_scores) / len(confidence_scores)
+                    if confidence_scores else 0)
+        return {
+            "full_text": "\n".join(lines),
+            "lines": lines,
+            "words": words,
+            "confidence": round(avg_conf, 2),
+            "block_count": len(blocks),
+        }
     
     def extract_forms(self, file_bytes: bytes) -> Dict:
         """Extract key-value pairs from forms"""
+        file_bytes = _ensure_textract_compatible(file_bytes)
         try:
             response = self.client.analyze_document(
                 Document={"Bytes": file_bytes},

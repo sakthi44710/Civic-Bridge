@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Government Scheme Application Form</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #eef2f7; color: #1a1a2e; }
+
+  .header { background: linear-gradient(135deg, #1a237e 0%, #283593 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; gap: 14px; }
+  .header img { width: 44px; height: 44px; }
+  .header .emblem { width: 44px; height: 44px; background: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: bold; color: #1a237e; }
+  .header h1 { font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  .header p { font-size: 11px; opacity: .85; margin-top: 2px; }
+
+  .breadcrumb { background: #fff; border-bottom: 1px solid #ddd; padding: 8px 24px; font-size: 11px; color: #666; }
+  .breadcrumb span { color: #1a237e; font-weight: 600; }
+
+  .form-container { max-width: 900px; margin: 18px auto; padding: 0 16px; }
+
+  .section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; overflow: hidden; }
+  .section-header { background: #f5f7fb; padding: 10px 18px; border-bottom: 1px solid #e8ecf0; display: flex; align-items: center; gap: 8px; }
+  .section-header .num { width: 22px; height: 22px; border-radius: 50%; background: #1a237e; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .section-header h2 { font-size: 13px; font-weight: 600; color: #1a237e; }
+
+  .fields { padding: 16px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .field { display: flex; flex-direction: column; }
+  .field.full { grid-column: 1 / -1; }
+  .field label { font-size: 11px; font-weight: 600; color: #444; margin-bottom: 4px; }
+  .field label .req { color: #d32f2f; }
+  .field input, .field select, .field textarea {
+    border: 1px solid #cfd8e3; border-radius: 5px; padding: 8px 10px; font-size: 13px;
+    transition: border-color .2s, box-shadow .2s; background: #fafbfd; color: #1a1a2e;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: none; border-color: #3f51b5; box-shadow: 0 0 0 3px rgba(63,81,181,.12);
+  }
+  .field input.filled, .field select.filled, .field textarea.filled {
+    border-color: #4caf50; background: #f1faf3;
+  }
+  .field textarea { resize: vertical; min-height: 60px; }
+
+  .actions { text-align: right; padding: 14px 18px; background: #fafbfd; border-top: 1px solid #e8ecf0; }
+  .btn { padding: 9px 28px; border: none; border-radius: 5px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn-primary { background: #1a237e; color: #fff; }
+  .btn-secondary { background: #e8ecf0; color: #444; margin-right: 8px; }
+
+  .progress-bar { height: 4px; background: #e0e0e0; border-radius: 2px; margin: 0 24px 0; }
+  .progress-bar .fill { height: 100%; background: linear-gradient(90deg, #4caf50, #2e7d32); border-radius: 2px; transition: width .4s ease; }
+
+  .status-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 12px; font-size: 10px; font-weight: 600; }
+  .status-badge.active { background: #e8f5e9; color: #2e7d32; }
+  .status-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="emblem">G</div>
+  <div>
+    <h1 id="scheme-title">Government Scheme Application</h1>
+    <p>National e-Governance Service Portal</p>
+  </div>
+</div>
+
+<div class="breadcrumb">
+  Home &gt; Schemes &gt; <span id="breadcrumb-scheme">Application Form</span>
+</div>
+
+<div style="padding:10px 24px; display:flex; align-items:center; justify-content:space-between;">
+  <div class="status-badge active"><span class="dot"></span> AI Form Filling Active</div>
+  <span style="font-size:11px; color:#888;" id="progress-text">0 / 18 fields completed</span>
+</div>
+<div class="progress-bar"><div class="fill" id="progress-fill" style="width:0%"></div></div>
+
+<div class="form-container">
+  <!-- Section 1: Personal Information -->
+  <div class="section">
+    <div class="section-header"><div class="num">1</div><h2>Personal Information</h2></div>
+    <div class="fields">
+      <div class="field">
+        <label>Full Name <span class="req">*</span></label>
+        <input type="text" id="full_name" name="full_name" placeholder="As per Aadhaar card" />
+      </div>
+      <div class="field">
+        <label>Father / Guardian Name <span class="req">*</span></label>
+        <input type="text" id="father_name" name="father_name" placeholder="Parent or guardian name" />
+      </div>
+      <div class="field">
+        <label>Date of Birth <span class="req">*</span></label>
+        <input type="text" id="date_of_birth" name="date_of_birth" placeholder="DD/MM/YYYY" />
+      </div>
+      <div class="field">
+        <label>Gender <span class="req">*</span></label>
+        <select id="gender" name="gender">
+          <option value="">-- Select --</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Category <span class="req">*</span></label>
+        <select id="category" name="category">
+          <option value="">-- Select --</option>
+          <option value="General">General</option>
+          <option value="OBC">OBC</option>
+          <option value="SC">SC</option>
+          <option value="ST">ST</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Aadhaar Number <span class="req">*</span></label>
+        <input type="text" id="aadhaar_number" name="aadhaar_number" placeholder="12-digit Aadhaar number" maxlength="12" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 2: Contact Details -->
+  <div class="section">
+    <div class="section-header"><div class="num">2</div><h2>Contact Details</h2></div>
+    <div class="fields">
+      <div class="field">
+        <label>Mobile Number <span class="req">*</span></label>
+        <input type="text" id="mobile_number" name="mobile_number" placeholder="10-digit mobile number" maxlength="10" />
+      </div>
+      <div class="field">
+        <label>Email Address</label>
+        <input type="email" id="email" name="email" placeholder="your@email.com" />
+      </div>
+      <div class="field">
+        <label>State <span class="req">*</span></label>
+        <select id="state" name="state">
+          <option value="">-- Select --</option>
+          <option value="Andhra Pradesh">Andhra Pradesh</option>
+          <option value="Assam">Assam</option>
+          <option value="Bihar">Bihar</option>
+          <option value="Chhattisgarh">Chhattisgarh</option>
+          <option value="Delhi">Delhi</option>
+          <option value="Goa">Goa</option>
+          <option value="Gujarat">Gujarat</option>
+          <option value="Haryana">Haryana</option>
+          <option value="Himachal Pradesh">Himachal Pradesh</option>
+          <option value="Jharkhand">Jharkhand</option>
+          <option value="Karnataka">Karnataka</option>
+          <option value="Kerala">Kerala</option>
+          <option value="Madhya Pradesh">Madhya Pradesh</option>
+          <option value="Maharashtra">Maharashtra</option>
+          <option value="Manipur">Manipur</option>
+          <option value="Meghalaya">Meghalaya</option>
+          <option value="Mizoram">Mizoram</option>
+          <option value="Nagaland">Nagaland</option>
+          <option value="Odisha">Odisha</option>
+          <option value="Punjab">Punjab</option>
+          <option value="Rajasthan">Rajasthan</option>
+          <option value="Sikkim">Sikkim</option>
+          <option value="Tamil Nadu">Tamil Nadu</option>
+          <option value="Telangana">Telangana</option>
+          <option value="Tripura">Tripura</option>
+          <option value="Uttar Pradesh">Uttar Pradesh</option>
+          <option value="Uttarakhand">Uttarakhand</option>
+          <option value="West Bengal">West Bengal</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>District <span class="req">*</span></label>
+        <input type="text" id="district" name="district" placeholder="District name" />
+      </div>
+      <div class="field">
+        <label>PIN Code <span class="req">*</span></label>
+        <input type="text" id="pincode" name="pincode" placeholder="6-digit PIN code" maxlength="6" />
+      </div>
+      <div class="field full">
+        <label>Full Address <span class="req">*</span></label>
+        <textarea id="address" name="address" placeholder="House No, Street, Locality, City"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 3: Financial & Education -->
+  <div class="section">
+    <div class="section-header"><div class="num">3</div><h2>Financial &amp; Education Details</h2></div>
+    <div class="fields">
+      <div class="field">
+        <label>Annual Family Income (₹)</label>
+        <input type="text" id="annual_income" name="annual_income" placeholder="e.g. 250000" />
+      </div>
+      <div class="field">
+        <label>Occupation</label>
+        <input type="text" id="occupation" name="occupation" placeholder="Current occupation" />
+      </div>
+      <div class="field">
+        <label>Education Level</label>
+        <select id="education" name="education">
+          <option value="">-- Select --</option>
+          <option value="Below 10th">Below 10th</option>
+          <option value="10th Pass">10th Pass</option>
+          <option value="12th Pass">12th Pass</option>
+          <option value="Graduate">Graduate</option>
+          <option value="Post Graduate">Post Graduate</option>
+          <option value="Doctorate">Doctorate</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 4: Bank Details -->
+  <div class="section">
+    <div class="section-header"><div class="num">4</div><h2>Bank Account Details</h2></div>
+    <div class="fields">
+      <div class="field">
+        <label>Bank Name</label>
+        <input type="text" id="bank_name" name="bank_name" placeholder="Name of the bank" />
+      </div>
+      <div class="field">
+        <label>Account Number</label>
+        <input type="text" id="account_number" name="account_number" placeholder="Bank account number" />
+      </div>
+      <div class="field">
+        <label>IFSC Code</label>
+        <input type="text" id="ifsc_code" name="ifsc_code" placeholder="e.g. SBIN0001234" />
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-secondary">Save Draft</button>
+    <button class="btn btn-primary" id="submit-btn">Submit Application</button>
+  </div>
+</div>
+
+<script>
+// Track filled fields and update progress
+function updateProgress() {
+  const fields = document.querySelectorAll('input, select, textarea');
+  let filled = 0, total = 0;
+  fields.forEach(f => {
+    if (f.id && f.name) {
+      total++;
+      if (f.value && f.value.trim()) {
+        filled++;
+        f.classList.add('filled');
+      } else {
+        f.classList.remove('filled');
+      }
+    }
+  });
+  const pct = total > 0 ? Math.round((filled / total) * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = filled + ' / ' + total + ' fields completed';
+}
+
+// Listen for input changes
+document.querySelectorAll('input, select, textarea').forEach(f => {
+  f.addEventListener('input', updateProgress);
+  f.addEventListener('change', updateProgress);
+});
+
+// MutationObserver for Playwright-driven value changes
+const observer = new MutationObserver(updateProgress);
+document.querySelectorAll('input, select, textarea').forEach(f => {
+  observer.observe(f, { attributes: true, attributeFilter: ['value'] });
+});
+
+// Periodically check for programmatic fills (Playwright uses dispatchEvent)
+setInterval(updateProgress, 500);
+</script>
+</body>
+</html>

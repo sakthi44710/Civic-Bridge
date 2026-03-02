@@ -4,6 +4,7 @@ import MarkdownMessage from './MarkdownMessage';
 /**
  * ChatGPT-style streaming text component.
  * Reveals the AI message character-by-character with a blinking cursor.
+ * Speed is calibrated to match natural reading pace (~3000 chars/sec).
  */
 export default function StreamingMessage({ content, role, isNew = false, onComplete }) {
   const [displayed, setDisplayed] = useState(isNew ? '' : content);
@@ -34,7 +35,7 @@ export default function StreamingMessage({ content, role, isNew = false, onCompl
         } else {
           setDisplayed(content.slice(0, idxRef.current));
         }
-      }, 12);
+      }, 8);
     };
 
     stream();
@@ -55,8 +56,8 @@ export default function StreamingMessage({ content, role, isNew = false, onCompl
 }
 
 /**
- * Adaptive chunk size — skip faster through whitespace and
- * markdown formatting, slower on actual content words.
+ * Adaptive chunk size — fast enough to match speech pace.
+ * Goal: finish printing a typical message (~500 chars) in ~2 seconds.
  */
 function getChunkSize(text, idx) {
   const remaining = text.length - idx;
@@ -64,13 +65,14 @@ function getChunkSize(text, idx) {
 
   const char = text[idx];
   // Fast-forward through whitespace, newlines, markdown symbols
-  if (char === '\n' || char === '\r') return 1;
-  if (char === ' ' && text[idx + 1] === ' ') return 2;
-  if ('*#|-_>[]()'.includes(char)) return 1;
+  if (char === '\n' || char === '\r') return 2;
+  if (char === ' ' && text[idx + 1] === ' ') return 3;
+  if ('*#|-_>[]()'.includes(char)) return 2;
 
-  // For long content, increase speed proportionally
-  if (remaining > 2000) return 4;
-  if (remaining > 1000) return 3;
-  if (remaining > 500) return 2;
-  return 1;
+  // Scale speed with message length — longer = faster
+  if (remaining > 2000) return 12;
+  if (remaining > 1000) return 8;
+  if (remaining > 500) return 5;
+  if (remaining > 200) return 3;
+  return 2;
 }

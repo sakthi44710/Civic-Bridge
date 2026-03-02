@@ -21,6 +21,8 @@ import asyncio
 import base64
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from app.services.bedrock_service import bedrock_service
@@ -28,6 +30,9 @@ from app.services.dynamodb_service import db
 from app.utils.helpers import generate_id, now_iso
 
 logger = logging.getLogger(__name__)
+
+# Path to local form template (used when no external URL is configured)
+_FORM_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "static" / "form_template.html"
 
 # Try to import Playwright
 try:
@@ -172,8 +177,23 @@ class FormFillingSession:
 
         self._running = True
 
+        # Take initial screenshot to show the empty form
+        initial_screenshot = ""
+        if self._page and PLAYWRIGHT_AVAILABLE:
+            try:
+                screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
+                initial_screenshot = base64.b64encode(screenshot_bytes).decode("utf-8")
+            except Exception:
+                pass
+
+        # If we pre-filled fields from profile, fill them in the browser too
+        if self.collected_fields and self._page and PLAYWRIGHT_AVAILABLE:
+            initial_screenshot = await self._fill_fields_in_browser(
+                list(self.collected_fields.keys())
+            ) or initial_screenshot
+
         # Send initial update
-        initial_update = self._build_update("started")
+        initial_update = self._build_update("started", screenshot=initial_screenshot)
         if self.on_update:
             await self.on_update(initial_update)
 
@@ -452,6 +472,7 @@ class FormFillingSession:
 
         if self._page and PLAYWRIGHT_AVAILABLE:
             try:
+                last_selector = None
                 for field_name in field_names:
                     value = self.collected_fields.get(field_name, "")
                     if not value:
@@ -467,18 +488,32 @@ class FormFillingSession:
                     if field_config and field_config.get("selector"):
                         selector = field_config["selector"]
                         field_type = field_config.get("type", "text")
+                        last_selector = selector
 
                         try:
-                            if field_type == "text":
-                                await self._page.fill(selector, value)
-                            elif field_type == "select":
-                                await self._page.select_option(selector, value=value)
+                            # Scroll element into view first
+                            await self._page.evaluate(
+                                "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
+                                selector,
+                            )
+                            await self._page.wait_for_timeout(200)
+
+                            if field_type == "select":
+                                # Try matching by value, then by label
+                                try:
+                                    await self._page.select_option(selector, value=value)
+                                except Exception:
+                                    try:
+                                        await self._page.select_option(selector, label=value)
+                                    except Exception as e2:
+                                        logger.warning(f"Select option failed for {field_name}: {e2}")
                             elif field_type == "radio":
                                 await self._page.click(f"{selector}[value='{value}']")
                             elif field_type == "checkbox":
                                 if value.lower() in ("true", "yes", "1"):
                                     await self._page.check(selector)
-                            elif field_type == "date":
+                            else:
+                                # text, date, textarea — all use fill()
                                 await self._page.fill(selector, value)
 
                             # Small delay for visual effect
@@ -486,7 +521,17 @@ class FormFillingSession:
                         except Exception as e:
                             logger.warning(f"Could not fill {field_name}: {e}")
 
-                # Take screenshot
+                # Take screenshot (scroll to last field for context)
+                if last_selector:
+                    try:
+                        await self._page.evaluate(
+                            "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
+                            last_selector,
+                        )
+                        await self._page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+
                 screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
                 screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
@@ -500,9 +545,11 @@ class FormFillingSession:
         return screenshot_b64
 
     async def _launch_browser(self):
-        """Launch headless Chromium for form filling."""
+        """Launch headless Chromium for form filling.
+        Navigates to the scheme portal URL when available, otherwise
+        loads the built-in form template so fields can be filled + screenshotted."""
         if not PLAYWRIGHT_AVAILABLE:
-            logger.info(f"[SIMULATION] Form agent running in simulation mode")
+            logger.info("[SIMULATION] Form agent running in simulation mode")
             return
 
         try:
@@ -531,13 +578,40 @@ class FormFillingSession:
             self._page = await context.new_page()
 
             # Navigate to the form URL if available
+            navigated = False
             if self.form_config and self.form_config.get("pages"):
                 first_page = self.form_config["pages"][0]
                 url = first_page.get("url")
                 if url:
-                    await self._page.goto(url, wait_until="networkidle", timeout=30000)
-                    await self._page.wait_for_timeout(2000)
-                    logger.info(f"Navigated to form: {url}")
+                    try:
+                        await self._page.goto(url, wait_until="networkidle", timeout=30000)
+                        await self._page.wait_for_timeout(2000)
+                        navigated = True
+                        logger.info(f"Navigated to form: {url}")
+                    except Exception as e:
+                        logger.warning(f"Failed to navigate to {url}: {e}")
+
+            # Fallback: load the built-in form template
+            if not navigated:
+                template_path = _FORM_TEMPLATE_PATH
+                if template_path.exists():
+                    file_url = template_path.as_uri()        # file:///...
+                    await self._page.goto(file_url, wait_until="load", timeout=10000)
+                    # Set scheme title in the template
+                    try:
+                        scheme_name = self.scheme_id.replace("_", " ").replace("-", " ").title()
+                        await self._page.evaluate(
+                            """(name) => {
+                                document.getElementById('scheme-title').textContent = name + ' Application';
+                                document.getElementById('breadcrumb-scheme').textContent = name;
+                            }""",
+                            scheme_name,
+                        )
+                    except Exception:
+                        pass
+                    logger.info("Loaded built-in form template")
+                else:
+                    logger.warning(f"Form template not found at {template_path}")
 
         except Exception as e:
             logger.error(f"Failed to launch browser: {e}")
@@ -648,26 +722,45 @@ class FormFillingSession:
                 self.collected_fields[field_name] = str(value)
 
     def _get_generic_fields(self) -> list:
-        """Return generic Indian government form fields."""
+        """Return generic Indian government form fields with CSS selectors
+        matching the built-in form_template.html."""
         return [
-            {"field_name": "full_name", "label": "Full Name", "type": "text", "description": "Applicant full name as per Aadhaar"},
-            {"field_name": "father_name", "label": "Father/Guardian Name", "type": "text", "description": "Parent or guardian name"},
-            {"field_name": "date_of_birth", "label": "Date of Birth", "type": "date", "description": "DD/MM/YYYY"},
-            {"field_name": "gender", "label": "Gender", "type": "select", "description": "Male/Female/Other"},
-            {"field_name": "category", "label": "Category", "type": "select", "description": "SC/ST/OBC/General"},
-            {"field_name": "aadhaar_number", "label": "Aadhaar Number", "type": "text", "description": "12-digit Aadhaar number"},
-            {"field_name": "mobile_number", "label": "Mobile Number", "type": "text", "description": "10-digit mobile number"},
-            {"field_name": "email", "label": "Email", "type": "text", "description": "Email address"},
-            {"field_name": "state", "label": "State", "type": "select", "description": "State of residence"},
-            {"field_name": "district", "label": "District", "type": "text", "description": "District"},
-            {"field_name": "pincode", "label": "PIN Code", "type": "text", "description": "6-digit PIN code"},
-            {"field_name": "address", "label": "Address", "type": "text", "description": "Full postal address"},
-            {"field_name": "bank_name", "label": "Bank Name", "type": "text", "description": "Name of the bank"},
-            {"field_name": "account_number", "label": "Bank Account Number", "type": "text", "description": "Bank account number"},
-            {"field_name": "ifsc_code", "label": "IFSC Code", "type": "text", "description": "Bank IFSC code"},
-            {"field_name": "annual_income", "label": "Annual Family Income", "type": "text", "description": "In INR"},
-            {"field_name": "occupation", "label": "Occupation", "type": "text", "description": "Current occupation"},
-            {"field_name": "education", "label": "Education Level", "type": "select", "description": "Highest qualification"},
+            {"field_name": "full_name", "label": "Full Name", "type": "text",
+             "selector": "#full_name", "description": "Applicant full name as per Aadhaar"},
+            {"field_name": "father_name", "label": "Father/Guardian Name", "type": "text",
+             "selector": "#father_name", "description": "Parent or guardian name"},
+            {"field_name": "date_of_birth", "label": "Date of Birth", "type": "text",
+             "selector": "#date_of_birth", "description": "DD/MM/YYYY"},
+            {"field_name": "gender", "label": "Gender", "type": "select",
+             "selector": "#gender", "description": "Male/Female/Other"},
+            {"field_name": "category", "label": "Category", "type": "select",
+             "selector": "#category", "description": "SC/ST/OBC/General"},
+            {"field_name": "aadhaar_number", "label": "Aadhaar Number", "type": "text",
+             "selector": "#aadhaar_number", "description": "12-digit Aadhaar number"},
+            {"field_name": "mobile_number", "label": "Mobile Number", "type": "text",
+             "selector": "#mobile_number", "description": "10-digit mobile number"},
+            {"field_name": "email", "label": "Email", "type": "text",
+             "selector": "#email", "description": "Email address"},
+            {"field_name": "state", "label": "State", "type": "select",
+             "selector": "#state", "description": "State of residence"},
+            {"field_name": "district", "label": "District", "type": "text",
+             "selector": "#district", "description": "District"},
+            {"field_name": "pincode", "label": "PIN Code", "type": "text",
+             "selector": "#pincode", "description": "6-digit PIN code"},
+            {"field_name": "address", "label": "Address", "type": "text",
+             "selector": "#address", "description": "Full postal address"},
+            {"field_name": "bank_name", "label": "Bank Name", "type": "text",
+             "selector": "#bank_name", "description": "Name of the bank"},
+            {"field_name": "account_number", "label": "Bank Account Number", "type": "text",
+             "selector": "#account_number", "description": "Bank account number"},
+            {"field_name": "ifsc_code", "label": "IFSC Code", "type": "text",
+             "selector": "#ifsc_code", "description": "Bank IFSC code"},
+            {"field_name": "annual_income", "label": "Annual Family Income", "type": "text",
+             "selector": "#annual_income", "description": "In INR"},
+            {"field_name": "occupation", "label": "Occupation", "type": "text",
+             "selector": "#occupation", "description": "Current occupation"},
+            {"field_name": "education", "label": "Education Level", "type": "select",
+             "selector": "#education", "description": "Highest qualification"},
         ]
 
     def _generate_simulation_screenshot(self, field_names: list) -> str:

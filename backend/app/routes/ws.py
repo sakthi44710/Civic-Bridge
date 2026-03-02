@@ -320,13 +320,15 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             await state["form_session"].on_conversation_text("assistant", ai_response)
 
         # Check if we should start form filling
-        if isinstance(ai_result, dict):
+        if isinstance(ai_result, dict) and not state.get("form_session"):
             intent = ai_result.get("intent", "")
-            if intent == "application_start" and not state.get("form_session"):
-                schemes = ai_result.get("suggested_schemes", [])
-                if schemes:
-                    state["scheme_id"] = schemes[0]
-                    await _start_form_agent(websocket, state)
+            schemes = ai_result.get("suggested_schemes", [])
+            # Auto-start form agent when the AI suggests specific schemes
+            # (not just application_start — also when user asks about a scheme)
+            if schemes and intent in ("application_start", "scheme_inquiry",
+                                      "eligibility_check", "application_help"):
+                state["scheme_id"] = schemes[0]
+                await _start_form_agent(websocket, state)
 
             # Send form update if present
             form_update = ai_result.get("form_update")
@@ -443,6 +445,15 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
         await websocket.send_json({"type": "transcript", "role": "assistant", "text": ai_response})
         if state.get("form_session"):
             await state["form_session"].on_conversation_text("assistant", ai_response)
+
+        # Auto-start form agent when schemes are suggested (same logic as text path)
+        if isinstance(ai_result, dict) and not state.get("form_session"):
+            intent = ai_result.get("intent", "")
+            schemes = ai_result.get("suggested_schemes", [])
+            if schemes and intent in ("application_start", "scheme_inquiry",
+                                      "eligibility_check", "application_help"):
+                state["scheme_id"] = schemes[0]
+                await _start_form_agent(websocket, state)
 
         # ── 5. TTS via Polly (clean spoken text only) ──
         try:

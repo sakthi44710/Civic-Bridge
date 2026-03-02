@@ -75,7 +75,7 @@ class DocumentService:
         s3_service.upload_file(file_content, s3_key, content_type)
         
         # Step 3: OCR / text extraction
-        # .docx files → python-docx; images/PDFs → AWS Textract
+        # .docx files → python-docx; images/PDFs → AWS Textract (with auto-format conversion)
         ext_lower = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
         is_docx = ext_lower in ("docx", "doc") or "wordprocessingml" in (content_type or "")
         try:
@@ -83,9 +83,19 @@ class DocumentService:
                 ocr_text = _extract_docx_text(file_content)
                 ocr_confidence = 100 if ocr_text else 0
             else:
-                ocr_result = textract_service.extract_text(file_content)
+                ocr_result = textract_service.extract_text(file_content, filename)
                 ocr_text = ocr_result.get("full_text", "")
                 ocr_confidence = ocr_result.get("confidence", 0)
+                # If Textract returned nothing, try Textract's form analysis for structured docs
+                if not ocr_text.strip():
+                    try:
+                        form_result = textract_service.extract_forms(file_content)
+                        kvp = form_result.get("key_value_pairs", {})
+                        if kvp:
+                            ocr_text = "\n".join(f"{k}: {v}" for k, v in kvp.items())
+                            ocr_confidence = 80
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"OCR failed: {e}")
             ocr_text = ""
