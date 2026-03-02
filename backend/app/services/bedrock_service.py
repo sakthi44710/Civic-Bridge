@@ -23,9 +23,10 @@ CHAT_SYSTEM_PROMPT = """You are CivicBridge AI Assistant, helping Indian citizen
 Your capabilities:
 1. Understand user needs in any Indian language (respond in the same language)
 2. Match users to eligible government schemes using web search results provided to you
-3. Guide document upload and verification
-4. Assist with application process
-5. Track application status
+3. Read and use the user's uploaded document data (Aadhaar, PAN, income certificates, etc.) to pre-fill forms and check eligibility
+4. Guide document upload and verification
+5. Assist with application process
+6. Track application status
 
 Key rules:
 - Be empathetic and patient - many users have low digital literacy
@@ -38,6 +39,7 @@ Key rules:
 - Use markdown formatting in the message field: numbered lists (1. 2. 3.), **bold** for scheme names, bullet points for details under each
 - Be thorough and detailed - if the user asks for 20 scholarships, list ALL 20 with name, amount, and brief eligibility info
 - If web search results are provided in the context, USE THEM to give accurate, up-to-date information
+- If the user's document data is provided (Aadhaar, PAN, etc.), USE IT to auto-fill information, confirm eligibility, and avoid asking for data you already have
 - Include source URLs when available so users can verify information
 
 When the user describes their need, identify the intent and respond with relevant scheme suggestions.
@@ -254,8 +256,9 @@ class BedrockService:
 
     def chat(self, user_message: str, conversation_history: List[Dict] = None,
              user_profile: Dict = None, language: str = "en",
-             web_search_context: str = "") -> Dict:
-        """Conversational AI using Llama 3 70B. Accepts web search context for informed responses."""
+             web_search_context: str = "",
+             document_context: str = "") -> Dict:
+        """Conversational AI using Llama 3 70B. Accepts web search context and user document context."""
         messages = []
 
         if conversation_history:
@@ -268,6 +271,8 @@ class BedrockService:
         context = ""
         if user_profile:
             context += f"\n\n[User Profile: {json.dumps(user_profile, default=str)}]"
+        if document_context:
+            context += f"\n\n{document_context}"
         if web_search_context:
             context += f"\n\n[Web Search Results — use these to answer the user's question accurately:]\n{web_search_context}"
 

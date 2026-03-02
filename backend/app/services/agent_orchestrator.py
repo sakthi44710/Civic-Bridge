@@ -65,11 +65,12 @@ class AgentOrchestrator:
         user_profile: Dict = None,
         language: str = "en",
         conversation_id: str = None,
+        document_context: str = "",
     ) -> Dict:
         """
         Process user message. Searches the web for relevant schemes/scholarships
-        when it detects a discovery intent, then passes search results to the
-        conversation agent for an informed response.
+        when it detects a discovery intent, then passes search results and user
+        document context to the conversation agent for an informed response.
         """
         agents_used = ["conversation"]
 
@@ -105,6 +106,7 @@ class AgentOrchestrator:
         convo_result = self._run_conversation_agent(
             user_message, conversation_history, user_profile, language,
             web_search_context=search_context,
+            document_context=document_context,
         )
 
         intent = convo_result.get("intent", "general_help")
@@ -218,10 +220,11 @@ class AgentOrchestrator:
         user_profile: Dict,
         language: str,
         web_search_context: str = "",
+        document_context: str = "",
     ) -> Dict:
         """
         Primary conversational agent. Uses Llama 3 70B.
-        Passes web search results as context for informed responses.
+        Passes web search results and user document context for informed responses.
         """
         return self.bedrock.chat(
             user_message=user_message,
@@ -229,6 +232,7 @@ class AgentOrchestrator:
             user_profile=user_profile,
             language=language,
             web_search_context=web_search_context,
+            document_context=document_context,
         )
 
     # ================================================================

@@ -93,8 +93,50 @@ export default function VoiceChat() {
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) { toast.error('File too large (max 10MB)'); return; }
     setUploading(true);
-    try { await documentsAPI.upload(file); toast.success('Document uploaded'); loadDocCount(); }
-    catch (err) { toast.error(err.response?.data?.detail || 'Upload failed'); }
+    try {
+      const resp = await documentsAPI.upload(file);
+      const data = resp.data;
+      const docType = data.document_type || 'document';
+      const aiName = data.ai_generated_name || file.name;
+      const extracted = data.extracted_data || {};
+      
+      // Show success with extracted info
+      const nameField = extracted.name || '';
+      const numField = extracted.document_number || '';
+      const preview = [nameField, numField].filter(Boolean).join(' • ');
+      toast.success(
+        `✅ ${docType.replace(/_/g, ' ').toUpperCase()} uploaded${preview ? `: ${preview}` : ''}`,
+        { duration: 4000 }
+      );
+      
+      // Inform the AI about the new document
+      const docMsg = `I just uploaded my ${docType.replace(/_/g, ' ')} document: "${aiName}". ${
+        Object.keys(extracted).length > 0
+          ? `Extracted: ${JSON.stringify(extracted, null, 0)}`
+          : 'OCR could not extract text (low quality scan).'
+      } Please acknowledge this and let me know what schemes I can now apply for.`;
+      
+      setMessages(p => [...p, { role: 'user', content: `📄 Uploaded: ${aiName}`, timestamp: new Date().toISOString() }]);
+      setIsThinking(true);
+      try {
+        const chatResp = await chatAPI.sendMessage(docMsg, conversationId, language);
+        const chatData = chatResp.data;
+        setConversationId(chatData.conversation_id);
+        if (chatData.message) {
+          setMessages(p => {
+            const newMsgs = [...p, { role: 'assistant', content: chatData.message, timestamp: new Date().toISOString() }];
+            setStreamingIdx(newMsgs.length - 1);
+            return newMsgs;
+          });
+        }
+      } catch { /* ignore chat error after upload */ }
+      setIsThinking(false);
+      
+      loadDocCount();
+    } catch (err) {
+      const detail = err.response?.data?.detail || err.message || 'Upload failed';
+      toast.error(`Upload failed: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+    }
     setUploading(false);
     if (fileRef.current) fileRef.current.value = '';
   };

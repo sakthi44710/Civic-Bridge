@@ -8,6 +8,7 @@ from app.models.conversation import ChatRequest
 from app.services.agent_orchestrator import orchestrator
 from app.services.translate_service import translate_service
 from app.services.dynamodb_service import db
+from app.services.document_service import document_service
 from app.utils.auth import get_current_user
 from app.utils.helpers import generate_id, now_iso
 
@@ -62,6 +63,13 @@ async def send_message(request: ChatRequest, user_id: str = Depends(get_current_
         logger.warning(f"Could not load conversation history: {e}")
     
     # Get AI response via multi-agent orchestrator
+    # Load user document context (RAG) - their uploaded ID/certificate data
+    doc_context = ""
+    try:
+        doc_context = document_service.get_user_document_context(user_id)
+    except Exception as e:
+        logger.warning(f"Could not load document context: {e}")
+
     try:
         ai_result = await orchestrator.process(
             user_message=user_message,
@@ -69,6 +77,7 @@ async def send_message(request: ChatRequest, user_id: str = Depends(get_current_
             user_profile=user_profile,
             language=language,
             conversation_id=conversation_id,
+            document_context=doc_context,
         )
         # Extract message string from dict response
         if isinstance(ai_result, dict):

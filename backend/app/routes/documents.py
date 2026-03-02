@@ -42,8 +42,9 @@ async def upload_document(
             document_type=document_type,
         )
     except Exception as e:
-        logger.error(f"Document processing error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process document")
+        import traceback
+        logger.error(f"Document processing error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
     
     if result.get("status") == "duplicate":
         raise HTTPException(status_code=409, detail=result)
@@ -100,7 +101,7 @@ async def download_document(document_id: str, user_id: str = Depends(get_current
     if not s3_key:
         raise HTTPException(status_code=404, detail="Document file not found")
     
-    download_url = s3_service.get_presigned_url(s3_key, expires_in=3600)
+    download_url = s3_service.get_presigned_url(s3_key, expiration=3600)
     return {
         "download_url": download_url,
         "filename": doc.get("ai_generated_name") or doc.get("original_filename", "document"),

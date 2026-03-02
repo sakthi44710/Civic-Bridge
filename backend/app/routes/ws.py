@@ -34,6 +34,7 @@ from app.services.agent_orchestrator import orchestrator
 from app.services.transcribe_service import transcribe_service
 from app.services.polly_service import polly_service
 from app.services.dynamodb_service import db
+from app.services.document_service import document_service
 from app.services.translate_service import translate_service
 from app.utils.auth import decode_token_unsafe
 from app.utils.helpers import generate_id, now_iso
@@ -102,6 +103,12 @@ async def voice_websocket(
             session_state["user_profile"] = db.get_user(user_id) or {}
         except Exception:
             pass
+
+        # Load document context for RAG (done once at WS connect)
+        try:
+            session_state["document_context"] = document_service.get_user_document_context(user_id)
+        except Exception:
+            session_state["document_context"] = ""
 
         # Main message loop
         while True:
@@ -255,6 +262,7 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             user_profile=state.get("user_profile", {}),
             language=state.get("language", "en"),
             conversation_id=state.get("conversation_id"),
+            document_context=state.get("document_context", ""),
         )
 
         ai_response = ai_result.get("message", str(ai_result)) if isinstance(ai_result, dict) else str(ai_result)

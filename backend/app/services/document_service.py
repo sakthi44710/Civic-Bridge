@@ -1,9 +1,11 @@
 """
 Document Service - Orchestrates Document Processing Pipeline
-Upload → S3 → OCR (Textract) → Entity Extraction (Comprehend) → Classification (Bedrock)
+Upload → S3 → OCR (Textract) → Entity Extraction (Comprehend) → Classification (Bedrock) → RAG Store
 """
 import logging
-from typing import Dict, Optional
+import json
+from decimal import Decimal
+from typing import Dict, List, Optional, Any
 from app.services.s3_service import s3_service
 from app.services.textract_service import textract_service
 from app.services.comprehend_service import comprehend_service
@@ -12,6 +14,17 @@ from app.services.dynamodb_service import db
 from app.utils.helpers import generate_id, file_hash, get_document_category, now_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_dynamo(obj: Any) -> Any:
+    """Recursively convert float → Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: _sanitize_for_dynamo(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_sanitize_for_dynamo(i) for i in obj]
+    return obj
 
 
 class DocumentService:
@@ -74,6 +87,7 @@ class DocumentService:
                 logger.error(f"Classification failed: {e}")
         
         # Step 6: Store metadata in DynamoDB
+        # DynamoDB does not support Python floats — use Decimal or str for all numeric fields
         doc_data = {
             "user_id": user_id,
             "document_id": document_id,
@@ -86,10 +100,12 @@ class DocumentService:
             "file_size": len(file_content),
             "content_hash": content_hash,
             "status": "processed",
-            "ocr_text": ocr_text[:5000] if ocr_text else "",  # Truncate for DynamoDB
-            "ocr_confidence": str(ocr_confidence),
-            "extracted_data": extracted_data,
-            "extracted_entities": extracted_entities,
+            # Store full OCR text for RAG (DynamoDB item limit is 400KB - truncate at 50k chars)
+            "ocr_text": ocr_text[:50000] if ocr_text else "",
+            "ocr_confidence": str(ocr_confidence),  # store as string to avoid float
+            # Sanitize nested dicts/floats for DynamoDB
+            "extracted_data": _sanitize_for_dynamo(extracted_data),
+            "extracted_entities": _sanitize_for_dynamo(extracted_entities),
             "is_verified": False,
             "upload_date": now_iso(),
             "processed_date": now_iso(),
@@ -98,7 +114,10 @@ class DocumentService:
         db.save_document(doc_data)
         
         # Generate presigned URL for viewing
-        view_url = s3_service.get_presigned_url(s3_key)
+        try:
+            view_url = s3_service.get_presigned_url(s3_key)
+        except Exception:
+            view_url = ""
         
         return {
             "status": "processed",
@@ -107,6 +126,7 @@ class DocumentService:
             "ai_generated_name": ai_generated_name,
             "extracted_data": extracted_data,
             "ocr_confidence": ocr_confidence,
+            "ocr_text_preview": ocr_text[:200] if ocr_text else "",
             "view_url": view_url,
         }
     
@@ -138,6 +158,85 @@ class DocumentService:
         # Delete from DynamoDB
         return db.delete_document(user_id, document_id)
     
+    def get_user_document_context(self, user_id: str) -> str:
+        """
+        Build a RAG context string from all user's uploaded documents.
+        Used by the AI chat and form-fill agents to access the user's
+        personal document data (name, Aadhaar number, DOB, address, etc.)
+        """
+        try:
+            docs = db.get_user_documents(user_id)
+        except Exception:
+            return ""
+
+        if not docs:
+            return ""
+
+        context_parts = ["[User's Uploaded Documents — use this information for form filling and eligibility matching:]"]
+
+        for doc in docs:
+            doc_type = doc.get("document_type", "unknown")
+            ai_name = doc.get("ai_generated_name", doc.get("original_filename", "unknown"))
+            extracted = doc.get("extracted_data", {})
+            ocr_text = doc.get("ocr_text", "")
+
+            section = [f"\n## Document: {ai_name} (Type: {doc_type})"]
+
+            # Include structured extracted fields first (highest quality)
+            if extracted:
+                fields = []
+                for key, val in extracted.items():
+                    if key == "other_fields" and isinstance(val, dict):
+                        for k2, v2 in val.items():
+                            if v2:
+                                fields.append(f"  - {k2}: {v2}")
+                    elif val:
+                        fields.append(f"  - {key}: {val}")
+                if fields:
+                    section.append("  Extracted Fields:")
+                    section.extend(fields)
+
+            # Include raw OCR text (trimmed) for any additional info
+            if ocr_text:
+                # Limit OCR snippet to 1000 chars per document to keep context manageable
+                section.append(f"  OCR Text (first 1000 chars): {ocr_text[:1000]}")
+
+            context_parts.append("\n".join(section))
+
+        return "\n".join(context_parts)
+
+    def get_document_map_for_form(self, user_id: str) -> Dict:
+        """
+        Returns a flat dict of key user data fields extracted from all documents.
+        Used by form-fill agent to auto-populate form fields.
+        """
+        try:
+            docs = db.get_user_documents(user_id)
+        except Exception:
+            return {}
+
+        merged = {}
+        # Process in order: identity docs first, then others
+        priority_types = ["aadhaar", "pan", "voter_id", "passport", "driving_license"]
+        sorted_docs = sorted(
+            docs,
+            key=lambda d: (priority_types.index(d.get("document_type", "")) 
+                           if d.get("document_type", "") in priority_types else 99)
+        )
+
+        for doc in sorted_docs:
+            extracted = doc.get("extracted_data", {})
+            if isinstance(extracted, dict):
+                for key, val in extracted.items():
+                    if key == "other_fields" and isinstance(val, dict):
+                        for k2, v2 in val.items():
+                            if v2 and k2 not in merged:
+                                merged[k2] = v2
+                    elif val and key not in merged:
+                        merged[key] = val
+
+        return merged
+
     def check_required_documents(self, user_id: str, required_docs: list) -> Dict:
         """Check which required documents user has"""
         user_docs = db.get_user_documents(user_id)
