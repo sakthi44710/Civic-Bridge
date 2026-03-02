@@ -38,6 +38,8 @@ export default function useNovaSonicCall({
   onUserMessage,
   onAIMessage,
   onFormUpdate,
+  onOtpRequest,
+  onCaptchaRequest,
   onStatusChange,
   onVolumeChange,
 }) {
@@ -129,7 +131,18 @@ export default function useNovaSonicCall({
         break;
 
       case 'form_update':
+        // Dispatch to general handler
         onFormUpdate?.(msg.data || msg);
+        // Also fire specific OTP/CAPTCHA handlers if status indicates waiting
+        if (msg.data?.status === 'waiting_otp') {
+          onOtpRequest?.(msg.data);
+        } else if (msg.data?.status === 'waiting_captcha') {
+          onCaptchaRequest?.(msg.data);
+        }
+        break;
+
+      case 'form_started':
+        console.log('Form session started:', msg.session_id);
         break;
 
       case 'error':
@@ -316,6 +329,30 @@ export default function useNovaSonicCall({
     }));
   }, []);
 
+  // ─── Send any raw JSON message via WebSocket ───────
+  const sendRawMessage = useCallback((msgObj) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.warn('WebSocket not connected — cannot send:', msgObj?.type);
+      return;
+    }
+    wsRef.current.send(JSON.stringify(msgObj));
+  }, []);
+
+  // ─── Start a form filling session for a scheme ──────
+  const startFormSession = useCallback((schemeId) => {
+    sendRawMessage({ type: 'start_form', scheme_id: schemeId });
+  }, [sendRawMessage]);
+
+  // ─── Submit OTP to the live browser ─────────────────
+  const submitOtp = useCallback((otp) => {
+    sendRawMessage({ type: 'submit_otp', otp });
+  }, [sendRawMessage]);
+
+  // ─── Submit CAPTCHA answer to the live browser ──────
+  const submitCaptcha = useCallback((text) => {
+    sendRawMessage({ type: 'submit_captcha', text });
+  }, [sendRawMessage]);
+
   // ─── Skip current AI response ─────────────────────
   const skipResponse = useCallback(() => {
     stopPlayback();
@@ -418,6 +455,10 @@ export default function useNovaSonicCall({
     startCall,
     endCall,
     sendTextMessage,
+    sendRawMessage,
+    startFormSession,
+    submitOtp,
+    submitCaptcha,
     skipResponse,
   };
 }

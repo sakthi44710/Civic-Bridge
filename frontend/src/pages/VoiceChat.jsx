@@ -61,6 +61,9 @@ export default function VoiceChat() {
   const [showMenu, setShowMenu] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [streamingIdx, setStreamingIdx] = useState(-1);
+  // OTP / CAPTCHA prompt from the live browser
+  const [interactionPrompt, setInteractionPrompt] = useState(null); // {type:'otp'|'captcha', captchaImageBase64?}
+  const [interactionInput, setInteractionInput] = useState('');
 
   // Handle form updates from the live form agent
   const handleFormUpdate = (update) => {
@@ -70,6 +73,37 @@ export default function VoiceChat() {
     if (data?.newly_filled?.length > 0) {
       toast.success(`Filled: ${data.newly_filled.join(', ')}`, { duration: 2000, icon: '📝' });
     }
+    // Clear any pending prompt if status is back to normal
+    if (!['waiting_otp', 'waiting_captcha'].includes(data?.status)) {
+      setInteractionPrompt(null);
+      setInteractionInput('');
+    }
+  };
+
+  const handleOtpRequest = (data) => {
+    setInteractionPrompt({ type: 'otp' });
+    setInteractionInput('');
+    toast('🔐 OTP required — enter it below', { icon: '📱', duration: 4000 });
+  };
+
+  const handleCaptchaRequest = (data) => {
+    setInteractionPrompt({ type: 'captcha', captchaImageBase64: data?.captcha_image_base64 || '' });
+    setInteractionInput('');
+    toast('🤖 CAPTCHA required — solve it below', { icon: '🔤', duration: 4000 });
+  };
+
+  const submitInteraction = () => {
+    const val = interactionInput.trim();
+    if (!val) return;
+    if (interactionPrompt?.type === 'otp') {
+      voiceCall.submitOtp(val);
+      toast.success('OTP sent to browser', { icon: '✅' });
+    } else {
+      voiceCall.submitCaptcha(val);
+      toast.success('CAPTCHA submitted', { icon: '✅' });
+    }
+    setInteractionPrompt(null);
+    setInteractionInput('');
   };
 
   // Nova Sonic WebSocket-based voice hook (speech-to-speech)
@@ -84,6 +118,8 @@ export default function VoiceChat() {
       return newMsgs;
     }),
     onFormUpdate: handleFormUpdate,
+    onOtpRequest: handleOtpRequest,
+    onCaptchaRequest: handleCaptchaRequest,
     onStatusChange: (s) => { setStatus(s); setVoiceStoreStatus(s); },
     onVolumeChange: setMicVolume,
   });
@@ -610,6 +646,77 @@ export default function VoiceChat() {
           </svg>
         </button>
       </footer>
+
+      {/* ═══ OTP / CAPTCHA MODAL ═══ */}
+      {interactionPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#0e0e14] border border-white/[0.08] rounded-2xl p-6 w-[340px] shadow-2xl animate-fade-in-up">
+            {interactionPrompt.type === 'otp' ? (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 rounded-xl bg-[#00d4ff]/10 border border-[#00d4ff]/20 flex items-center justify-center text-xl">🔐</div>
+                  <div>
+                    <h3 className="text-white font-semibold text-[15px]">OTP Required</h3>
+                    <p className="text-white/30 text-[11px]">The government portal has sent an OTP to your phone</p>
+                  </div>
+                </div>
+                <input
+                  autoFocus
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={8}
+                  placeholder="Enter OTP"
+                  value={interactionInput}
+                  onChange={e => setInteractionInput(e.target.value.replace(/\D/g, ''))}
+                  onKeyDown={e => e.key === 'Enter' && submitInteraction()}
+                  className="w-full bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-3 text-white text-center text-2xl font-bold tracking-[0.3em] outline-none focus:border-[#00d4ff]/30 mb-4"
+                />
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 rounded-xl bg-[#00cc88]/10 border border-[#00cc88]/20 flex items-center justify-center text-xl">🔤</div>
+                  <div>
+                    <h3 className="text-white font-semibold text-[15px]">CAPTCHA Required</h3>
+                    <p className="text-white/30 text-[11px]">Solve the CAPTCHA to continue the form</p>
+                  </div>
+                </div>
+                {interactionPrompt.captchaImageBase64 && (
+                  <div className="mb-3 rounded-xl overflow-hidden border border-white/[0.08] bg-white p-2">
+                    <img
+                      src={`data:image/png;base64,${interactionPrompt.captchaImageBase64}`}
+                      alt="CAPTCHA"
+                      className="w-full h-auto object-contain max-h-[80px]"
+                    />
+                  </div>
+                )}
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Type CAPTCHA text"
+                  value={interactionInput}
+                  onChange={e => setInteractionInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && submitInteraction()}
+                  className="w-full bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-3 text-white text-center text-xl font-bold tracking-widest outline-none focus:border-[#00cc88]/30 mb-4"
+                />
+              </>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setInteractionPrompt(null); setInteractionInput(''); }}
+                className="flex-1 py-2.5 rounded-xl border border-white/[0.06] text-white/40 text-[12px] hover:bg-white/[0.03] transition-all">
+                Cancel
+              </button>
+              <button
+                onClick={submitInteraction}
+                disabled={!interactionInput.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-[#00d4ff] to-[#00cc88] text-[#060609] font-bold text-[12px] disabled:opacity-30 hover:shadow-lg hover:shadow-[#00d4ff]/20 transition-all">
+                Submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

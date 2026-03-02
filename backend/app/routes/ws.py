@@ -125,6 +125,36 @@ async def voice_websocket(
             elif msg_type == "text_message":
                 await _handle_text_message(websocket, session_state, msg)
 
+            elif msg_type == "start_form":
+                # Client explicitly starts a form session (e.g. user picks a scheme)
+                scheme_id = msg.get("scheme_id")
+                if scheme_id:
+                    session_state["scheme_id"] = scheme_id
+                    await _start_form_agent(websocket, session_state)
+                    await websocket.send_json({
+                        "type": "form_started",
+                        "scheme_id": scheme_id,
+                        "session_id": session_state["form_session"].session_id if session_state.get("form_session") else None,
+                    })
+
+            elif msg_type == "submit_otp":
+                # User speaks / types the OTP — relay to live browser
+                form_session = session_state.get("form_session")
+                if form_session:
+                    otp = str(msg.get("otp", "")).strip()
+                    await form_session.submit_otp(otp)
+                else:
+                    await websocket.send_json({"type": "error", "message": "No active form session"})
+
+            elif msg_type == "submit_captcha":
+                # User types the CAPTCHA answer — relay to live browser
+                form_session = session_state.get("form_session")
+                if form_session:
+                    captcha_text = str(msg.get("text", "")).strip()
+                    await form_session.submit_captcha(captcha_text)
+                else:
+                    await websocket.send_json({"type": "error", "message": "No active form session"})
+
             elif msg_type == "session_end":
                 await _handle_session_end(websocket, session_state)
                 break

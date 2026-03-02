@@ -26,6 +26,11 @@ python-dotenv>=1.0.0
 httpx>=0.26.0
 aiofiles>=23.0.0
 
+# Browser automation (headless Chromium for cloud form filling)
+# After pip install, run: python -m playwright install chromium --with-deps
+playwright>=1.40.0
+python-docx>=1.1.0
+
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.23.0

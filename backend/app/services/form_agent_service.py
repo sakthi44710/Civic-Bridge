@@ -35,7 +35,38 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright not installed. Form agent will use simulation mode.")
+    logger.warning("Playwright not installed. Form agent will use simulation mode. "
+                   "Run: pip install playwright && python -m playwright install chromium")
+
+# ─── Common selectors for Indian govt portals ──────────────────────────
+OTP_SELECTORS = [
+    'input[name*="otp" i]', 'input[id*="otp" i]',
+    'input[placeholder*="OTP"]', 'input[placeholder*="otp" i]',
+    '#otp', '#txtOtp', '#OTPInput', '#otpInput',
+    'input[maxlength="6"][type="text"]', 'input[maxlength="6"][type="number"]',
+    'input[maxlength="4"][type="text"]',
+    '.otp-input', '.otp input',
+]
+
+CAPTCHA_SELECTORS = [
+    'input[name*="captcha" i]', 'input[id*="captcha" i]',
+    'input[placeholder*="captcha" i]', 'input[placeholder*="Captcha"]',
+    '#captcha', '#txtCaptcha', '#captchaText', '#captchaInput', '.captcha-input',
+    'input[name*="security" i]', 'input[id*="security_code" i]',
+]
+
+CAPTCHA_IMG_SELECTORS = [
+    'img[id*="captcha" i]', 'img[src*="captcha" i]',
+    'img[alt*="captcha" i]', '#captchaImage', '#imgCaptcha',
+    '.captcha img', '.captcha-img', 'img[class*="captcha" i]',
+]
+
+VERIFY_BTN_SELECTORS = [
+    'button:text-is("Verify OTP")', 'button:text-is("Verify")',
+    'button:text-is("Submit OTP")', 'button:text-is("Validate")',
+    'input[value*="Verify" i]', 'input[value*="Submit" i]',
+    '#btnVerify', '#verifyOTP', '.verify-btn',
+]
 
 
 # ============================================================
@@ -106,6 +137,11 @@ class FormFillingSession:
         self._pw = None
         self._running = False
 
+        # OTP / CAPTCHA gating
+        self.waiting_for: Optional[str] = None   # None | 'otp' | 'captcha'
+        self._otp_selector: Optional[str] = None
+        self._captcha_selector: Optional[str] = None
+
         # Conversation buffer
         self._last_user_text = ""
         self._last_assistant_text = ""
@@ -162,6 +198,10 @@ class FormFillingSession:
         # Only process when we have both user and assistant text
         # (or just user text for immediate extraction)
         if role == "user" and not self._processing:
+            # If browser is waiting for OTP/CAPTCHA input, skip conversation extraction
+            if self.waiting_for:
+                logger.info(f"[FormAgent] Skipping extraction — waiting for {self.waiting_for}")
+                return
             self._processing = True
             try:
                 await self._extract_and_fill(text, self._last_assistant_text)
@@ -230,12 +270,31 @@ class FormFillingSession:
             # Fill form fields via Playwright
             screenshot_b64 = await self._fill_fields_in_browser(new_fields_filled)
 
-            # Send update to frontend
-            update = self._build_update(
-                status="filling",
-                screenshot=screenshot_b64,
-                newly_filled=new_fields_filled,
-            )
+            # After filling, check if page now requires OTP / CAPTCHA
+            interaction = await self._detect_page_interactions()
+            if interaction["needs_captcha"]:
+                self.waiting_for = "captcha"
+                self._captcha_selector = interaction["captcha_selector"]
+                update = self._build_update(
+                    status="waiting_captcha",
+                    screenshot=screenshot_b64,
+                    newly_filled=new_fields_filled,
+                    extra={"captcha_image_base64": interaction["captcha_image_base64"]},
+                )
+            elif interaction["needs_otp"]:
+                self.waiting_for = "otp"
+                self._otp_selector = interaction["otp_selector"]
+                update = self._build_update(
+                    status="waiting_otp",
+                    screenshot=screenshot_b64,
+                    newly_filled=new_fields_filled,
+                )
+            else:
+                update = self._build_update(
+                    status="filling",
+                    screenshot=screenshot_b64,
+                    newly_filled=new_fields_filled,
+                )
 
             if self.on_update:
                 await self.on_update(update)
@@ -245,6 +304,147 @@ class FormFillingSession:
 
         except Exception as e:
             logger.warning(f"Field extraction error: {e}")
+
+    async def submit_otp(self, otp: str) -> Dict:
+        """Called when the user provides the OTP. Types it into the live browser page."""
+        self.waiting_for = None
+        screenshot_b64 = ""
+
+        if self._page and PLAYWRIGHT_AVAILABLE:
+            try:
+                selector = self._otp_selector
+                # Find the first visible OTP field if we don't have a cached selector
+                if not selector:
+                    for sel in OTP_SELECTORS:
+                        elem = await self._page.query_selector(sel)
+                        if elem and await elem.is_visible():
+                            selector = sel
+                            break
+
+                if selector:
+                    await self._page.fill(selector, str(otp).strip())
+                    await self._page.wait_for_timeout(300)
+
+                    # Try clicking a Verify / Submit OTP button
+                    for btn_sel in VERIFY_BTN_SELECTORS:
+                        try:
+                            await self._page.click(btn_sel, timeout=1500)
+                            break
+                        except Exception:
+                            pass
+
+                    await self._page.wait_for_timeout(2000)  # wait for redirect
+
+                screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+
+                # Check again — maybe we triggered another page needing CAPTCHA
+                interaction = await self._detect_page_interactions()
+                if interaction["needs_captcha"]:
+                    self.waiting_for = "captcha"
+                    self._captcha_selector = interaction["captcha_selector"]
+                    update = self._build_update("waiting_captcha", screenshot=screenshot_b64,
+                                                extra={"captcha_image_base64": interaction["captcha_image_base64"]})
+                else:
+                    update = self._build_update("otp_submitted", screenshot=screenshot_b64)
+            except Exception as e:
+                logger.warning(f"OTP submit error: {e}")
+                update = self._build_update("otp_error", screenshot=screenshot_b64)
+        else:
+            update = self._build_update("otp_submitted", screenshot="")
+
+        if self.on_update:
+            await self.on_update(update)
+        self._save_progress()
+        return update
+
+    async def submit_captcha(self, captcha_text: str) -> Dict:
+        """Called when the user provides the CAPTCHA answer. Types it into the live browser page."""
+        self.waiting_for = None
+        screenshot_b64 = ""
+
+        if self._page and PLAYWRIGHT_AVAILABLE:
+            try:
+                selector = self._captcha_selector
+                if not selector:
+                    for sel in CAPTCHA_SELECTORS:
+                        elem = await self._page.query_selector(sel)
+                        if elem and await elem.is_visible():
+                            selector = sel
+                            break
+
+                if selector:
+                    await self._page.fill(selector, captcha_text.strip())
+                    await self._page.wait_for_timeout(300)
+
+                screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+
+                # Check if OTP field appeared after CAPTCHA
+                interaction = await self._detect_page_interactions()
+                if interaction["needs_otp"]:
+                    self.waiting_for = "otp"
+                    self._otp_selector = interaction["otp_selector"]
+                    update = self._build_update("waiting_otp", screenshot=screenshot_b64)
+                else:
+                    update = self._build_update("captcha_submitted", screenshot=screenshot_b64)
+            except Exception as e:
+                logger.warning(f"CAPTCHA submit error: {e}")
+                update = self._build_update("captcha_error", screenshot=screenshot_b64)
+        else:
+            update = self._build_update("captcha_submitted", screenshot="")
+
+        if self.on_update:
+            await self.on_update(update)
+        self._save_progress()
+        return update
+
+    async def _detect_page_interactions(self) -> Dict:
+        """Scan the current Playwright page for OTP / CAPTCHA fields."""
+        result = {
+            "needs_otp": False, "otp_selector": None,
+            "needs_captcha": False, "captcha_selector": None,
+            "captcha_image_base64": "",
+        }
+        if not self._page or not PLAYWRIGHT_AVAILABLE:
+            return result
+        try:
+            # Detect OTP fields
+            for sel in OTP_SELECTORS:
+                try:
+                    elem = await self._page.query_selector(sel)
+                    if elem and await elem.is_visible():
+                        result["needs_otp"] = True
+                        result["otp_selector"] = sel
+                        break
+                except Exception:
+                    pass
+
+            # Detect CAPTCHA fields
+            for sel in CAPTCHA_SELECTORS:
+                try:
+                    elem = await self._page.query_selector(sel)
+                    if elem and await elem.is_visible():
+                        result["needs_captcha"] = True
+                        result["captcha_selector"] = sel
+                        break
+                except Exception:
+                    pass
+
+            # If CAPTCHA detected, grab the CAPTCHA image for the user
+            if result["needs_captcha"]:
+                for img_sel in CAPTCHA_IMG_SELECTORS:
+                    try:
+                        img_elem = await self._page.query_selector(img_sel)
+                        if img_elem and await img_elem.is_visible():
+                            img_bytes = await img_elem.screenshot()
+                            result["captcha_image_base64"] = base64.b64encode(img_bytes).decode("utf-8")
+                            break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Page interaction detection error: {e}")
+        return result
 
     async def _fill_fields_in_browser(self, field_names: List[str]) -> str:
         """Fill specific fields in the Playwright browser and take a screenshot."""
@@ -361,30 +561,27 @@ class FormFillingSession:
         logger.info(f"Form session closed: {self.session_id}")
 
     def _build_update(self, status: str, screenshot: str = "",
-                      newly_filled: list = None) -> Dict:
+                      newly_filled: list = None, extra: dict = None) -> Dict:
         """Build a form update event for the frontend."""
-        filled_fields_display = {}
-        for fname in (newly_filled or []):
-            filled_fields_display[fname] = self.collected_fields.get(fname, "")
-
-        return {
-            "type": "form_update",
-            "data": {
-                "session_id": self.session_id,
-                "application_id": self.application_id,
-                "scheme_id": self.scheme_id,
-                "status": status,
-                "current_page": self.current_page,
-                "total_pages": self.total_pages,
-                "fields_filled": len(self.collected_fields),
-                "total_fields": self.total_fields,
-                "filled_fields": self.collected_fields,
-                "newly_filled": newly_filled or [],
-                "screenshot_base64": screenshot,
-                "page_name": self._get_current_page_name(),
-                "timestamp": now_iso(),
-            }
+        data = {
+            "session_id": self.session_id,
+            "application_id": self.application_id,
+            "scheme_id": self.scheme_id,
+            "status": status,
+            "waiting_for": self.waiting_for,   # 'otp' | 'captcha' | None
+            "current_page": self.current_page,
+            "total_pages": self.total_pages,
+            "fields_filled": len(self.collected_fields),
+            "total_fields": self.total_fields,
+            "filled_fields": self.collected_fields,
+            "newly_filled": newly_filled or [],
+            "screenshot_base64": screenshot,
+            "page_name": self._get_current_page_name(),
+            "timestamp": now_iso(),
         }
+        if extra:
+            data.update(extra)
+        return {"type": "form_update", "data": data}
 
     def _get_current_page_name(self) -> str:
         """Get the name of the current form page."""
@@ -482,40 +679,62 @@ class FormFillingSession:
 class FormAgentService:
     """
     Manages form-filling sessions across users.
-    
-    Each active voice conversation can have one associated form session.
-    The form agent listens to conversation transcripts and fills forms
-    seamlessly in the background.
+
+    Session isolation: each user_id maps to exactly ONE active browser session.
+    Calling start_session() a second time for the same user kills the old browser
+    and starts a fresh one — no cross-user access is possible.
     """
 
     def __init__(self):
+        # session_id  → FormFillingSession
         self._sessions: Dict[str, FormFillingSession] = {}
+        # user_id     → session_id  (enforces one browser per user)
+        self._user_sessions: Dict[str, str] = {}
 
     async def start_session(self, user_id: str, scheme_id: str,
                             application_id: str = None,
                             user_data: dict = None,
                             on_update: Callable = None) -> FormFillingSession:
-        """Start a new form-filling session."""
+        """Start a new isolated form-filling session for this user.
+        Automatically tears down any previous session for the same user."""
+        # Tear down previous session for this user (browser isolation)
+        old_sid = self._user_sessions.get(user_id)
+        if old_sid and old_sid in self._sessions:
+            logger.info(f"[FormAgent] Replacing existing session {old_sid} for user {user_id}")
+            await self.stop_session(old_sid)
+
         session = FormFillingSession(
             user_id=user_id,
             scheme_id=scheme_id,
             application_id=application_id,
             on_update=on_update,
         )
-
         await session.start(user_data)
-        self._sessions[session.session_id] = session
 
+        self._sessions[session.session_id] = session
+        self._user_sessions[user_id] = session.session_id  # one session per user
+
+        logger.info(f"[FormAgent] Session {session.session_id} started for user {user_id}, scheme={scheme_id}")
         return session
 
     def get_session(self, session_id: str) -> Optional[FormFillingSession]:
-        """Get an active session."""
+        """Get a session by ID."""
         return self._sessions.get(session_id)
+
+    def get_session_by_user(self, user_id: str) -> Optional[FormFillingSession]:
+        """Get the active session for a user (returns None if no active session)."""
+        sid = self._user_sessions.get(user_id)
+        return self._sessions.get(sid) if sid else None
 
     async def stop_session(self, session_id: str):
         """Stop and clean up a session."""
         session = self._sessions.pop(session_id, None)
         if session:
+            # Remove from user → session mapping
+            self._user_sessions = {
+                uid: sid for uid, sid in self._user_sessions.items()
+                if sid != session_id
+            }
             await session.close()
 
     async def stop_all(self):
