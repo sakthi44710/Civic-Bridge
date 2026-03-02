@@ -403,24 +403,38 @@ class NovaSonicService:
         self._available = None
 
     def is_available(self) -> bool:
-        """Check if Nova Sonic model is accessible."""
+        """Check if Nova Sonic model is truly accessible in this AWS account/region."""
         if self._available is not None:
             return self._available
 
         try:
             client = aws.bedrock_runtime()
-            # Quick check — try to see if the model is invocable
-            # We just check the client has the method
-            has_method = hasattr(client, 'invoke_model_with_bidirectional_stream')
-            self._available = has_method
-            if has_method:
-                logger.info("Nova Sonic speech-to-speech: AVAILABLE")
-            else:
-                logger.info("Nova Sonic speech-to-speech: NOT AVAILABLE (boto3 too old)")
-            return self._available
+            # First: does the boto3 SDK support the bidirectional API at all?
+            if not hasattr(client, 'invoke_model_with_bidirectional_stream'):
+                self._available = False
+                logger.info("Nova Sonic: NOT AVAILABLE (boto3 too old)")
+                return False
+
+            # Second: try to open a stream — if the model isn't enabled in this
+            # account/region, this raises an exception immediately.
+            test_stream = client.invoke_model_with_bidirectional_stream(
+                modelId="amazon.nova-sonic-v1:0",
+            )
+            # Close it right away — we only needed to confirm access
+            try:
+                body = test_stream.get("body")
+                if body:
+                    body.close()
+            except Exception:
+                pass
+
+            self._available = True
+            logger.info("Nova Sonic speech-to-speech: AVAILABLE")
+            return True
+
         except Exception as e:
-            logger.warning(f"Nova Sonic availability check failed: {e}")
             self._available = False
+            logger.info(f"Nova Sonic speech-to-speech: NOT AVAILABLE ({e.__class__.__name__}: {str(e)[:80]}) — using STT+LLM+TTS fallback")
             return False
 
     def create_session(self, language: str = "en",

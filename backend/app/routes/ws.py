@@ -23,8 +23,10 @@ Backend → Frontend:
   {"type": "error", "message": "..."}
 """
 import asyncio
+import base64
 import json
 import logging
+import struct
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 
@@ -259,10 +261,18 @@ async def _handle_audio_chunk(websocket: WebSocket, state: dict, msg: dict):
         # Stream directly to Nova Sonic (speech-to-speech)
         await nova_session.send_audio(audio_b64)
     else:
-        # Fallback: collect audio chunks for batch processing
+        # Fallback: accumulate PCM chunks, then process after 2.5s of silence
         if "audio_buffer" not in state:
             state["audio_buffer"] = []
         state["audio_buffer"].append(audio_b64)
+
+        # Cancel previous debounce timer and start a fresh one
+        prev = state.get("audio_debounce_task")
+        if prev and not prev.done():
+            prev.cancel()
+        state["audio_debounce_task"] = asyncio.ensure_future(
+            _process_audio_after_silence(websocket, state)
+        )
 
 
 async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
@@ -354,6 +364,131 @@ async def _handle_session_end(websocket: WebSocket, state: dict):
     await _cleanup_session(state)
     await websocket.send_json({"type": "status", "status": "idle"})
     logger.info(f"Session ended for {state['user_id']}")
+
+
+# ═════════════════════════════════════════════════════════
+# Fallback Audio Pipeline  (STT → Bedrock → Polly)
+# ═════════════════════════════════════════════════════════
+
+async def _process_audio_after_silence(websocket: WebSocket, state: dict,
+                                        silence_s: float = 2.2):
+    """
+    Debounced fallback: waits for silence_s seconds after the last audio chunk,
+    then runs the full STT → AI → TTS pipeline.
+    """
+    try:
+        await asyncio.sleep(silence_s)
+
+        buffer: list = state.pop("audio_buffer", [])
+        if not buffer:
+            return
+
+        # Need at least ~0.3s of audio (0.3 * 16000 Hz * 2 bytes = 9600 bytes)
+        try:
+            total_pcm = b"".join(base64.b64decode(c) for c in buffer)
+        except Exception:
+            return
+        if len(total_pcm) < 9600:
+            await websocket.send_json({"type": "status", "status": "listening"})
+            return
+
+        await websocket.send_json({"type": "status", "status": "processing"})
+
+        # ── 1. STT via Transcribe ────────────────────────
+        text = ""
+        try:
+            wav_bytes = _pcm16_to_wav(total_pcm)
+            stt_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: transcribe_service.transcribe_audio(
+                    wav_bytes, state.get("language", "en"), "wav"
+                )
+            )
+            text = (stt_result.get("text") or stt_result.get("transcript") or "").strip()
+        except Exception as e:
+            logger.warning(f"STT error: {e}")
+
+        if not text:
+            await websocket.send_json({"type": "status", "status": "listening"})
+            return
+
+        # ── 2. Send user transcript ─────────────────────
+        await websocket.send_json({"type": "transcript", "role": "user", "text": text})
+        if state.get("form_session"):
+            await state["form_session"].on_conversation_text("user", text)
+
+        # ── 3. AI response via Bedrock ─────────────────
+        try:
+            ai_result = await orchestrator.process(
+                user_message=text,
+                conversation_history=state.get("conversation_history", []),
+                user_profile=state.get("user_profile", {}),
+                language=state.get("language", "en"),
+                conversation_id=state.get("conversation_id"),
+                document_context=state.get("document_context", ""),
+            )
+            ai_response = (
+                ai_result.get("message", str(ai_result))
+                if isinstance(ai_result, dict) else str(ai_result)
+            )
+        except Exception as e:
+            logger.error(f"AI error in audio fallback: {e}")
+            ai_response = "Sorry, I couldn't process that. Please try again."
+
+        # ── 4. Send AI transcript + feed form agent ───
+        await websocket.send_json({"type": "status", "status": "speaking"})
+        await websocket.send_json({"type": "transcript", "role": "assistant", "text": ai_response})
+        if state.get("form_session"):
+            await state["form_session"].on_conversation_text("assistant", ai_response)
+
+        # ── 5. TTS via Polly ────────────────────────
+        try:
+            tts = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: polly_service.synthesize(ai_response, state.get("language", "en"))
+            )
+            audio_out = tts.get("audio_base64", "")
+            if audio_out:
+                await websocket.send_json({
+                    "type": "audio_chunk",
+                    "data": audio_out,
+                    "format": "mp3",
+                })
+        except Exception as e:
+            logger.warning(f"TTS error: {e}")
+
+        # ── 6. Save conversation ──────────────────────
+        state["conversation_history"].append({"role": "user", "content": text})
+        state["conversation_history"].append({"role": "assistant", "content": ai_response})
+        asyncio.ensure_future(_save_message(state, "user", text))
+        asyncio.ensure_future(_save_message(state, "assistant", ai_response))
+
+        await websocket.send_json({"type": "status", "status": "listening"})
+
+    except asyncio.CancelledError:
+        pass  # More audio arrived — debounce reset, that's expected
+    except Exception as e:
+        logger.error(f"Audio fallback pipeline error: {e}")
+        try:
+            await websocket.send_json({"type": "status", "status": "listening"})
+        except Exception:
+            pass
+
+
+def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 16000,
+                  channels: int = 1, bits: int = 16) -> bytes:
+    """Wrap raw 16-bit PCM bytes in a minimal WAV container."""
+    data_size = len(pcm_bytes)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_size, b'WAVE',
+        b'fmt ', 16, 1,          # PCM format
+        channels, sample_rate,
+        sample_rate * channels * bits // 8,
+        channels * bits // 8, bits,
+        b'data', data_size,
+    )
+    return header + pcm_bytes
 
 
 # ═══════════════════════════════════════════════════════════
@@ -475,6 +610,11 @@ async def _save_message(state: dict, role: str, text: str):
 
 async def _cleanup_session(state: dict):
     """Clean up all session resources."""
+    # Cancel any pending audio debounce task
+    debounce = state.get("audio_debounce_task")
+    if debounce and not debounce.done():
+        debounce.cancel()
+
     # Close Nova Sonic
     nova_session = state.get("nova_session")
     if nova_session:
