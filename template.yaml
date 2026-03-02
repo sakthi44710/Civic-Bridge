@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CivicBridge - AI-powered Government Scheme Discovery Platform
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.12
+    Environment:
+      Variables:
+        AWS_REGION_NAME: ap-south-1
+        ENVIRONMENT: production
+        USERS_TABLE: !Ref UsersTable
+        DOCUMENTS_TABLE: !Ref DocumentsTable
+        APPLICATIONS_TABLE: !Ref ApplicationsTable
+        SCHEMES_TABLE: !Ref SchemesTable
+        CONVERSATIONS_TABLE: !Ref ConversationsTable
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        SCREENSHOTS_BUCKET: !Ref ScreenshotsBucket
+        BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    Default: change-this-in-production
+
+Resources:
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  # Lambda Function
+  CivicBridgeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda_handler.handler
+      CodeUri: backend/
+      Description: CivicBridge API Lambda Function
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ApplicationsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SchemesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationsTable
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentsBucket
+        - S3CrudPolicy:
+            BucketName: !Ref ScreenshotsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - transcribe:*
+                - polly:*
+                - textract:*
+                - comprehend:*
+                - translate:*
+                - sns:Publish
+              Resource: '*'
+      Events:
+        ApiProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+  # DynamoDB Tables
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub civicbridge-users-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: phone_number
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: phone-index
+          KeySchema:
+            - AttributeName: phone_number
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub civicbridge-documents-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: document_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: document_id
+          KeyType: RANGE
+
+  ApplicationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub civicbridge-applications-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: application_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: application_id
+          KeyType: RANGE
+
+  SchemesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub civicbridge-schemes-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: scheme_id
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scheme_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: category-index
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub civicbridge-conversations-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: conversation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: conversation_id
+          KeyType: RANGE
+
+  # S3 Buckets
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub civicbridge-documents-${Stage}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ScreenshotsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub civicbridge-screenshots-${Stage}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  FunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt CivicBridgeFunction.Arn

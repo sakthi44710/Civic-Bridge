@@ -1,0 +1,536 @@
+import { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuthStore, useLanguageStore, useVoiceStore } from '../store';
+import { chatAPI, documentsAPI, userAPI } from '../services/api';
+import useNovaSonicCall from '../hooks/useNovaSonicCall';
+import Globe from '../components/Globe';
+import MarkdownMessage from '../components/MarkdownMessage';
+import StreamingMessage from '../components/StreamingMessage';
+import toast from 'react-hot-toast';
+
+if (typeof window !== 'undefined') window.toast = toast;
+
+const TAP_TEXT = {
+  hi: 'बोलने के लिए टैप करें', en: 'Tap to speak',
+  ta: 'தொடங்க தட்டவும்', te: 'ప్రారంభించడానికి నొక్కండి',
+  bn: 'শুরু করতে ট্যাপ করুন', mr: 'सुरू करण्यासाठी टॅप करा',
+  gu: 'શરૂ કરવા માટે ટેપ કરો', kn: 'ಪ್ರಾರಂಭಿಸಲು ಟ್ಯಾಪ್ ಮಾಡಿ',
+  ml: 'ആരംഭിക്കാൻ ടാപ്പ് ചെയ്യുക', pa: 'ਸ਼ੁਰੂ ਕਰਨ ਲਈ ਟੈਪ ਕਰੋ',
+};
+
+export default function VoiceChat() {
+  const navigate = useNavigate();
+  const { user, logout } = useAuthStore();
+  const { language } = useLanguageStore();
+  const { setStatus: setVoiceStoreStatus } = useVoiceStore();
+  const chatEndRef = useRef(null);
+  const fileRef = useRef(null);
+
+  const [inCall, setInCall] = useState(false);
+  const [status, setStatus] = useState('idle');
+  const [micVolume, setMicVolume] = useState(0);
+  const [messages, setMessages] = useState([]);
+  const [textInput, setTextInput] = useState('');
+  const [conversationId, setConversationId] = useState(null);
+  const [currentAppName, setCurrentAppName] = useState('New Session');
+  const [formInfo, setFormInfo] = useState(null);
+  const [formScreenshot, setFormScreenshot] = useState('');
+  const [profileCompletion, setProfileCompletion] = useState(0);
+  const [docCount, setDocCount] = useState(0);
+  const [uploading, setUploading] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [streamingIdx, setStreamingIdx] = useState(-1);
+
+  // Handle form updates from the live form agent
+  const handleFormUpdate = (update) => {
+    const data = update?.data || update;
+    setFormInfo(data);
+    if (data?.screenshot_base64) setFormScreenshot(data.screenshot_base64);
+    if (data?.newly_filled?.length > 0) {
+      toast.success(`Filled: ${data.newly_filled.join(', ')}`, { duration: 2000, icon: '📝' });
+    }
+  };
+
+  // Nova Sonic WebSocket-based voice hook (speech-to-speech)
+  const voiceCall = useNovaSonicCall({
+    conversationId, language,
+    schemeId: formInfo?.scheme_id || null,
+    onConversationId: setConversationId,
+    onUserMessage: (text) => setMessages(p => [...p, { role: 'user', content: text, timestamp: new Date().toISOString() }]),
+    onAIMessage: (text) => setMessages(p => {
+      const newMsgs = [...p, { role: 'assistant', content: text, timestamp: new Date().toISOString() }];
+      setStreamingIdx(newMsgs.length - 1);
+      return newMsgs;
+    }),
+    onFormUpdate: handleFormUpdate,
+    onStatusChange: (s) => { setStatus(s); setVoiceStoreStatus(s); },
+    onVolumeChange: setMicVolume,
+  });
+
+  useEffect(() => { loadProfileStatus(); loadDocCount(); }, []);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  const loadProfileStatus = async () => {
+    try {
+      const resp = await userAPI.getProfile();
+      const p = resp.data;
+      const fields = ['name', 'email', 'phone_number', 'dob', 'gender', 'category', 'state', 'district', 'pincode', 'address'];
+      setProfileCompletion(Math.round((fields.filter(f => p[f]).length / fields.length) * 100));
+    } catch { setProfileCompletion(0); }
+  };
+
+  const loadDocCount = async () => {
+    try {
+      const resp = await documentsAPI.list();
+      const docs = Array.isArray(resp.data) ? resp.data : resp.data?.documents || [];
+      setDocCount(docs.length);
+    } catch { setDocCount(0); }
+  };
+
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { toast.error('File too large (max 10MB)'); return; }
+    setUploading(true);
+    try { await documentsAPI.upload(file); toast.success('Document uploaded'); loadDocCount(); }
+    catch (err) { toast.error(err.response?.data?.detail || 'Upload failed'); }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const handleGlobeClick = () => {
+    if (!inCall) { setInCall(true); voiceCall.startCall(); }
+    else if (status === 'speaking') { voiceCall.skipResponse(); }
+  };
+
+  const handleEndCall = () => { setInCall(false); voiceCall.endCall(); };
+
+  const sendTextMessage = async () => {
+    const msg = textInput.trim();
+    if (!msg) return;
+    setTextInput('');
+    setMessages(p => [...p, { role: 'user', content: msg, timestamp: new Date().toISOString() }]);
+    if (!currentAppName || currentAppName === 'New Session') setCurrentAppName(msg.substring(0, 30));
+
+    // If WebSocket is active (in call), send via WS for real-time form agent processing
+    if (inCall) {
+      voiceCall.sendTextMessage(msg);
+      return;
+    }
+
+    // Otherwise use REST API — show thinking indicator
+    setIsThinking(true);
+    try {
+      const resp = await chatAPI.sendMessage(msg, conversationId, language);
+      const data = resp.data;
+      setConversationId(data.conversation_id);
+      if (data.message) {
+        setMessages(p => {
+          const newMsgs = [...p, { role: 'assistant', content: data.message, timestamp: new Date().toISOString() }];
+          setStreamingIdx(newMsgs.length - 1);
+          return newMsgs;
+        });
+      }
+      if (data.form_update) handleFormUpdate(data.form_update);
+    } catch {
+      setMessages(p => {
+        const newMsgs = [...p, { role: 'assistant', content: 'Something went wrong. Please try again.', timestamp: new Date().toISOString() }];
+        setStreamingIdx(newMsgs.length - 1);
+        return newMsgs;
+      });
+    }
+    setIsThinking(false);
+  };
+
+  const handleKeyDown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); } };
+  const handleLogout = () => { if (inCall) voiceCall.endCall(); logout(); navigate('/auth', { replace: true }); };
+  const tapText = TAP_TEXT[language] || TAP_TEXT['en'];
+  const completionPercentage = formInfo?.fields_filled && formInfo?.total_fields ? Math.round((formInfo.fields_filled / formInfo.total_fields) * 100) : 0;
+
+  return (
+    <div className="fixed inset-0 bg-[#060609] flex flex-col overflow-hidden">
+      {/* Ambient background */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-[-20%] right-[-10%] w-[800px] h-[800px] rounded-full opacity-[0.02]"
+          style={{ background: 'radial-gradient(circle, #00d4ff, transparent 70%)', filter: 'blur(120px)' }} />
+        <div className="absolute bottom-[-20%] left-[-10%] w-[600px] h-[600px] rounded-full opacity-[0.015]"
+          style={{ background: 'radial-gradient(circle, #00cc88, transparent 70%)', filter: 'blur(100px)' }} />
+      </div>
+
+      {/* ═══ TOP HEADER BAR ═══ */}
+      <header className="relative z-30 flex items-center justify-between px-5 h-[56px] border-b border-white/[0.04] bg-[#060609]/80 backdrop-blur-xl">
+        {/* Left: Hamburger + Account Name */}
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <button onClick={() => setShowMenu(!showMenu)}
+              className="w-9 h-9 rounded-xl bg-white/[0.03] border border-white/[0.05] flex items-center justify-center hover:bg-white/[0.06] transition-all">
+              <svg className="w-4 h-4 text-white/50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            {showMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
+                <div className="absolute left-0 top-12 z-50 w-52 bg-[#0e0e14] border border-white/[0.06] rounded-xl shadow-2xl p-1.5 animate-fade-in-up">
+                  <button onClick={() => { setShowMenu(false); navigate('/profile'); }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-white/60 text-xs hover:bg-white/[0.04] hover:text-white transition-all flex items-center gap-2.5">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                    Profile Settings
+                  </button>
+                  <button onClick={() => { setShowMenu(false); navigate('/schemes'); }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-white/60 text-xs hover:bg-white/[0.04] hover:text-white transition-all flex items-center gap-2.5">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                    Browse Schemes
+                  </button>
+                  <button onClick={() => { setShowMenu(false); navigate('/applications'); }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-white/60 text-xs hover:bg-white/[0.04] hover:text-white transition-all flex items-center gap-2.5">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
+                    My Applications
+                  </button>
+                  <div className="h-px bg-white/[0.04] my-1" />
+                  <button onClick={() => { setShowMenu(false); handleLogout(); }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-red-400/70 text-xs hover:bg-red-500/10 hover:text-red-400 transition-all flex items-center gap-2.5">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                    Sign Out
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl px-4 py-1.5">
+            <span className="text-white font-semibold text-[14px] tracking-tight">{user?.name || 'User'}</span>
+          </div>
+        </div>
+
+        {/* Center: CivicBridge Logo */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#00d4ff] to-[#00cc88] flex items-center justify-center shadow-lg shadow-[#00d4ff]/10">
+            <svg viewBox="0 0 20 20" className="w-4 h-4" fill="white"><circle cx="10" cy="10" r="3" /></svg>
+          </div>
+          <span className="text-white font-bold text-[15px] tracking-tight">CivicBridge</span>
+        </div>
+
+        {/* Right: Download App + Icons */}
+        <div className="flex items-center gap-2">
+          <button className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.03] border border-white/[0.05] hover:bg-white/[0.06] transition-all">
+            <span className="text-white/60 text-xs font-medium hidden sm:block">Download Mobile App</span>
+            <svg className="w-4 h-4 text-white/40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+          </button>
+          <button onClick={() => navigate('/applications')} className="nav-btn" title="Applications">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      {/* ═══ MAIN CONTENT ═══ */}
+      <div className="flex-1 flex overflow-hidden relative z-10">
+
+        {/* ═══ LEFT COLUMN ═══ */}
+        <div className="w-[420px] border-r border-white/[0.04] flex flex-col bg-[#060609]/60 backdrop-blur-sm overflow-y-auto scrollbar-thin">
+          {/* Top row: 3 cards side by side */}
+          <div className="p-3 flex gap-2.5">
+            {/* Profile Status Card */}
+            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Profile Status</span>
+                <button onClick={() => navigate('/profile')} className="text-[9px] text-[#00d4ff]/60 hover:text-[#00d4ff] transition-colors font-medium">→</button>
+              </div>
+              <div className="flex justify-center">
+                <div className="relative">
+                  <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
+                    <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="2.5" />
+                    <circle cx="18" cy="18" r="14" fill="none" stroke="url(#pg)" strokeWidth="2.5"
+                      strokeDasharray={`${profileCompletion} ${100 - profileCompletion}`} strokeLinecap="round" />
+                    <defs><linearGradient id="pg" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stopColor="#00d4ff" /><stop offset="100%" stopColor="#00cc88" />
+                    </linearGradient></defs>
+                  </svg>
+                  <span className="absolute inset-0 flex items-center justify-center text-[13px] text-white font-bold">{profileCompletion}%</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Documents Card */}
+            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Documents</span>
+              </div>
+              <div className="text-center mb-2">
+                <span className="text-2xl font-bold text-[#00d4ff]">{docCount}</span>
+                <p className="text-[9px] text-white/20 mt-0.5">Total uploaded</p>
+              </div>
+              <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png" />
+              <button onClick={() => fileRef.current?.click()} disabled={uploading}
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.02] border border-dashed border-white/[0.06] text-white/30 hover:text-[#00d4ff] hover:border-[#00d4ff]/20 transition-all text-[10px] font-medium disabled:opacity-40">
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+                {uploading ? 'Uploading...' : 'Upload'}
+              </button>
+            </div>
+
+            {/* Application Name Card */}
+            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+              <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest block mb-2">Application</span>
+              <p className="text-white/80 text-[13px] font-medium leading-snug">{currentAppName}</p>
+              <div className="flex items-center gap-1.5 mt-2">
+                <div className={`w-1.5 h-1.5 rounded-full ${conversationId ? 'bg-[#00cc88]' : 'bg-white/10'}`} />
+                <span className="text-white/20 text-[10px]">{conversationId ? 'Active' : 'Not started'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Live Form Filling Area - takes remaining space */}
+          <div className="px-3 pb-3 flex-1">
+            <div className="bg-white/[0.02] border border-white/[0.04] rounded-2xl p-4 h-full flex flex-col">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-white/80 font-semibold text-[13px]">Live Form Filling</h3>
+                {formInfo && (
+                  <span className="text-[#00cc88] text-[10px] flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00cc88] animate-pulse" />Active
+                  </span>
+                )}
+              </div>
+
+              {formInfo ? (
+                <div className="flex-1 flex flex-col min-h-0">
+                  {/* Progress bar */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-[11px] mb-1.5">
+                      <span className="text-white/30">Fields Completed</span>
+                      <span className="text-[#00d4ff] font-bold">{formInfo.fields_filled || 0}/{formInfo.total_fields || 0}</span>
+                    </div>
+                    <div className="w-full h-2 bg-white/[0.03] rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-[#00d4ff] to-[#00cc88] rounded-full transition-all duration-500"
+                        style={{ width: `${completionPercentage}%` }} />
+                    </div>
+                  </div>
+
+                  {/* Live browser screenshot projection */}
+                  {formScreenshot && (
+                    <div className="mb-3 rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.01]">
+                      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04]">
+                        <div className="w-2 h-2 rounded-full bg-red-400/50" />
+                        <div className="w-2 h-2 rounded-full bg-yellow-400/50" />
+                        <div className="w-2 h-2 rounded-full bg-green-400/50" />
+                        <span className="text-[9px] text-white/20 ml-2 uppercase tracking-wider">Live Browser</span>
+                        <div className="ml-auto flex items-center gap-1">
+                          <div className="w-1 h-1 rounded-full bg-[#00cc88] animate-pulse" />
+                          <span className="text-[8px] text-[#00cc88]/70">LIVE</span>
+                        </div>
+                      </div>
+                      <img
+                        src={`data:image/png;base64,${formScreenshot}`}
+                        alt="Live form filling"
+                        className="w-full h-auto max-h-[200px] object-contain bg-white/5"
+                      />
+                    </div>
+                  )}
+
+                  {/* Section name */}
+                  {formInfo.page_name && (
+                    <div className="bg-white/[0.01] border border-white/[0.03] rounded-lg px-3 py-2 mb-2">
+                      <span className="text-[9px] text-white/20 uppercase tracking-widest">Current: </span>
+                      <span className="text-white/60 text-[11px] font-medium">{formInfo.page_name}</span>
+                    </div>
+                  )}
+
+                  {/* Filled fields list */}
+                  <div className="flex-1 overflow-y-auto scrollbar-thin space-y-1.5 min-h-0">
+                    {formInfo.filled_fields && Object.entries(formInfo.filled_fields).map(([key, value]) => {
+                      const isNew = formInfo.newly_filled?.includes(key);
+                      return (
+                        <div key={key} className={`flex items-center justify-between rounded-lg px-3 py-2 transition-all duration-300 ${
+                          isNew
+                            ? 'bg-[#00d4ff]/5 border border-[#00d4ff]/15'
+                            : 'bg-white/[0.01] border border-white/[0.03]'
+                        }`}>
+                          <span className="text-white/25 text-[11px] capitalize">{key.replace(/_/g, ' ')}</span>
+                          <span className={`text-[11px] font-medium max-w-[50%] truncate ${isNew ? 'text-[#00d4ff]' : 'text-white/60'}`}>{value}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
+                  <div className="w-16 h-16 rounded-2xl bg-white/[0.02] border border-white/[0.04] flex items-center justify-center mb-4">
+                    <svg className="w-7 h-7 text-white/8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                  <p className="text-white/25 text-sm font-medium mb-1">No form in progress</p>
+                  <p className="text-white/10 text-[11px] leading-relaxed">When you start applying for a scheme, the AI agent will fill forms here in real-time as you speak</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ═══ CENTER - VOICE INTERFACE ═══ */}
+        <main className="flex-1 flex flex-col items-center justify-center relative">
+          {/* Application Completion % - Phase indicators */}
+          <div className="absolute top-6 left-1/2 -translate-x-1/2">
+            <div className="bg-white/[0.02] border border-white/[0.04] rounded-2xl px-5 py-3 backdrop-blur-sm">
+              <p className="text-[10px] text-white/30 uppercase tracking-widest text-center mb-2.5">Application Completion</p>
+              <div className="flex items-center gap-1">
+                {['Discovery', 'Documents', 'Form Fill', 'Submit'].map((phase, i) => (
+                  <div key={phase} className="flex items-center">
+                    <div className={`px-3 py-1 rounded-full text-[10px] font-medium transition-all ${
+                      i === 0 && (formInfo || conversationId) ? 'bg-[#00d4ff]/10 text-[#00d4ff] border border-[#00d4ff]/20'
+                      : i === 1 && docCount > 0 ? 'bg-[#00cc88]/10 text-[#00cc88] border border-[#00cc88]/20'
+                      : i === 2 && formInfo ? 'bg-[#00d4ff]/10 text-[#00d4ff] border border-[#00d4ff]/20'
+                      : 'bg-white/[0.02] text-white/15 border border-white/[0.04]'
+                    }`}>{phase}</div>
+                    {i < 3 && <div className="w-3 h-px bg-white/[0.06] mx-0.5" />}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Globe */}
+          <div className="relative z-10">
+            <Globe status={status} inCall={inCall} volume={micVolume} onClick={handleGlobeClick} tapText={tapText} />
+          </div>
+
+          {/* Play/Pause Call control */}
+          <div className="mt-8 z-20">
+            {inCall ? (
+              <button onClick={handleEndCall}
+                className="w-14 h-14 rounded-full bg-white/[0.03] border border-white/[0.06] flex items-center justify-center hover:bg-red-500/10 hover:border-red-500/20 transition-all active:scale-90 group">
+                <svg className="w-6 h-6 text-white/40 group-hover:text-red-400 transition-colors" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="5" width="4" height="14" rx="1" />
+                  <rect x="14" y="5" width="4" height="14" rx="1" />
+                </svg>
+              </button>
+            ) : (
+              <button onClick={handleGlobeClick}
+                className="w-14 h-14 rounded-full bg-white/[0.03] border border-white/[0.06] flex items-center justify-center hover:bg-white/[0.06] hover:border-[#00d4ff]/20 transition-all active:scale-90 group">
+                <svg className="w-6 h-6 text-white/40 group-hover:text-[#00d4ff] transition-colors" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </main>
+
+        {/* ═══ RIGHT - AI CHAT PANEL ═══ */}
+        <aside className="w-[420px] border-l border-white/[0.04] flex flex-col bg-[#060609]/60 backdrop-blur-sm">
+          {/* Chat header */}
+          <div className="px-5 h-[52px] flex items-center border-b border-white/[0.04]">
+            <div className="flex items-center gap-2.5 flex-1">
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00d4ff]/15 to-[#00cc88]/10 flex items-center justify-center border border-white/[0.04]">
+                <span className="text-[11px] font-bold text-[#00d4ff]">AI</span>
+              </div>
+              <div>
+                <h3 className="text-white/80 font-semibold text-[13px]">AI Chat</h3>
+                <p className="text-white/20 text-[10px]">
+                  {status === 'speaking' ? 'Speaking...' : status === 'listening' ? 'Listening...' : 'Ready'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 scrollbar-thin scrollbar-thumb-white/5 scrollbar-track-transparent">
+            {messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#00d4ff]/10 to-[#00cc88]/5 border border-[#00d4ff]/10 flex items-center justify-center mb-4 shadow-lg shadow-[#00d4ff]/5">
+                  <svg className="w-7 h-7 text-[#00d4ff]/30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                </div>
+                <p className="text-white/30 text-sm font-semibold">CivicBridge AI</p>
+                <p className="text-white/15 text-[11px] mt-1.5 leading-relaxed max-w-[220px]">Ask about scholarships, government schemes, or start a voice conversation</p>
+              </div>
+            )}
+            {messages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} group`}>
+                {msg.role === 'assistant' && (
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00d4ff]/20 to-[#00cc88]/15 flex items-center justify-center mr-2.5 mt-1 flex-shrink-0 border border-[#00d4ff]/10 shadow-lg shadow-[#00d4ff]/5">
+                    <span className="text-[9px] font-bold text-[#00d4ff]">AI</span>
+                  </div>
+                )}
+                <div className={`rounded-2xl text-[13px] leading-relaxed ${
+                  msg.role === 'user'
+                    ? 'max-w-[75%] bg-gradient-to-br from-white/[0.06] to-white/[0.03] text-white/85 border border-white/[0.08] rounded-br-md px-4 py-3'
+                    : 'max-w-[88%] text-white/60 py-1'
+                }`}>
+                  {msg.role === 'user' && (
+                    <p className="text-[9px] text-[#00d4ff]/30 font-semibold uppercase tracking-wider mb-1.5">You</p>
+                  )}
+                  {msg.role === 'assistant' ? (
+                    <StreamingMessage
+                      content={msg.content}
+                      role={msg.role}
+                      isNew={i === streamingIdx}
+                      onComplete={() => setStreamingIdx(-1)}
+                    />
+                  ) : (
+                    <MarkdownMessage content={msg.content} role={msg.role} />
+                  )}
+                </div>
+              </div>
+            ))}
+            {/* Thinking indicator */}
+            {isThinking && (
+              <div className="flex justify-start">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00d4ff]/20 to-[#00cc88]/15 flex items-center justify-center mr-2.5 mt-1 flex-shrink-0 border border-[#00d4ff]/10">
+                  <span className="text-[9px] font-bold text-[#00d4ff]">AI</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-4 py-3">
+                  <div className="flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00d4ff]/50 animate-bounce [animation-delay:0ms]"></div>
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00d4ff]/50 animate-bounce [animation-delay:150ms]"></div>
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00d4ff]/50 animate-bounce [animation-delay:300ms]"></div>
+                  </div>
+                  <span className="text-[11px] text-white/20 ml-1">Searching & thinking...</span>
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* Input */}
+          <div className="p-3 border-t border-white/[0.04]">
+            <div className="flex items-end gap-2 bg-white/[0.03] border border-white/[0.06] rounded-2xl px-4 py-2 focus-within:border-[#00d4ff]/20 transition-colors">
+              <textarea
+                value={textInput}
+                onChange={e => { setTextInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); } }}
+                placeholder="Message CivicBridge..."
+                rows={1}
+                className="flex-1 bg-transparent text-white text-[13px] placeholder-white/20 outline-none resize-none max-h-[120px] py-1.5 leading-relaxed"
+              />
+              <button onClick={sendTextMessage} disabled={!textInput.trim()}
+                className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00d4ff] to-[#00cc88] flex items-center justify-center disabled:opacity-20 disabled:from-white/10 disabled:to-white/10 hover:shadow-lg hover:shadow-[#00d4ff]/20 transition-all active:scale-90 flex-shrink-0 mb-0.5">
+                <svg className="w-4 h-4 text-[#060609]" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-center text-white/10 text-[10px] mt-2">CivicBridge AI can make mistakes. Verify important information.</p>
+          </div>
+        </aside>
+      </div>
+
+      {/* ═══ FOOTER BAR ═══ */}
+      <footer className="relative z-30 flex items-center justify-between px-6 h-[36px] border-t border-white/[0.04] bg-[#060609]/80">
+        <div />
+        <p className="text-white/10 text-[10px] tracking-widest uppercase font-medium">Powered by AWS AI</p>
+        <button onClick={handleLogout} title="Sign Out"
+          className="w-7 h-7 rounded-lg bg-white/[0.02] border border-white/[0.04] flex items-center justify-center hover:bg-red-500/10 hover:border-red-500/15 transition-all group">
+          <svg className="w-3.5 h-3.5 text-white/20 group-hover:text-red-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
+        </button>
+      </footer>
+    </div>
+  );
+}

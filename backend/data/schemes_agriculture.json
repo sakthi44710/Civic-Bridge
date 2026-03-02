@@ -1,0 +1,178 @@
+[
+  {
+    "scheme_id": "AGRI001",
+    "name": "PM-KISAN (Pradhan Mantri Kisan Samman Nidhi)",
+    "description": "Direct income support of ₹6,000 per year to all landholding farmer families in three equal installments of ₹2,000 each.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://pmkisan.gov.in/",
+    "status": "active",
+    "benefit_amount": "₹6,000 per year",
+    "benefit_description": "₹2,000 every 4 months directly to bank account. Covers all landholding farmer families.",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Visit nearest CSC center or PM-KISAN portal → Register with Aadhaar + land records → Verified by state → Amount transferred to bank",
+    "automation_config": {
+      "portal": "pmkisan",
+      "pages": [
+        {
+          "name": "Farmer Registration",
+          "url": "https://pmkisan.gov.in/RegistrationForm.aspx",
+          "fields": [
+            {"field_name": "aadhaarNo", "source": "aadhaar.number", "type": "text"},
+            {"field_name": "state", "source": "profile.state", "type": "select"},
+            {"field_name": "district", "source": "profile.district", "type": "select"},
+            {"field_name": "subDistrict", "source": "profile.sub_district", "type": "select"},
+            {"field_name": "village", "source": "profile.village", "type": "select"}
+          ]
+        },
+        {
+          "name": "Personal & Bank Details",
+          "url": "https://pmkisan.gov.in/RegistrationForm.aspx",
+          "fields": [
+            {"field_name": "farmerName", "source": "profile.name", "type": "text"},
+            {"field_name": "gender", "source": "profile.gender", "type": "select"},
+            {"field_name": "dob", "source": "profile.dob", "type": "date"},
+            {"field_name": "category", "source": "profile.category", "type": "select"},
+            {"field_name": "farmerType", "source": "profile.farmer_type", "type": "select"},
+            {"field_name": "ifsc", "source": "profile.ifsc", "type": "text"},
+            {"field_name": "accountNo", "source": "profile.bank_account", "type": "text"},
+            {"field_name": "mobile", "source": "profile.phone", "type": "text"}
+          ]
+        },
+        {
+          "name": "Land Details",
+          "url": "https://pmkisan.gov.in/RegistrationForm.aspx",
+          "fields": [
+            {"field_name": "surveyNo", "source": "land_record.survey_number", "type": "text"},
+            {"field_name": "khasraNo", "source": "land_record.khasra_number", "type": "text"},
+            {"field_name": "landArea", "source": "land_record.area_hectares", "type": "text"},
+            {"field_name": "landOwnership", "source": "land_record.ownership_type", "type": "select"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "scheme_id": "AGRI002",
+    "name": "Pradhan Mantri Fasal Bima Yojana (PMFBY)",
+    "description": "Comprehensive crop insurance scheme providing financial support to farmers in case of crop failure due to natural calamities, pests, and diseases.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://pmfby.gov.in/",
+    "status": "active",
+    "benefit_amount": "Full sum insured minus premium",
+    "benefit_description": "Premium: 2% Kharif, 1.5% Rabi, 5% commercial/horticulture. Government pays remaining premium. Claims settled to bank account.",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "sowing_certificate", "mandatory": true}
+    ],
+    "how_to_apply": "Visit bank/CSC/PMFBY portal → Fill crop details → Pay subsidized premium → Get insurance coverage"
+  },
+  {
+    "scheme_id": "AGRI003",
+    "name": "Kisan Credit Card (KCC) Scheme",
+    "description": "Provides farmers with affordable credit for agriculture, animal husbandry, and fisheries activities at subsidized interest rates.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://www.pmkisan.gov.in/KCC.aspx",
+    "status": "active",
+    "benefit_amount": "Up to ₹3 lakhs at 4% interest (with subvention)",
+    "benefit_description": "7% interest rate with 3% subvention (net 4%) for loans up to ₹3 lakhs if repaid on time. Also covers personal accident insurance of ₹50,000.",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer", "fisherman", "animal_husbandry"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "passport_photo", "mandatory": true}
+    ],
+    "how_to_apply": "Visit nearest bank branch → Fill KCC application form → Submit land documents → Bank processes and issues KCC"
+  },
+  {
+    "scheme_id": "AGRI004",
+    "name": "Soil Health Card Scheme",
+    "description": "Provides soil health cards to farmers with crop-wise recommendations for nutrients and fertilizers to improve productivity.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://soilhealth.dac.gov.in/",
+    "status": "active",
+    "benefit_amount": "Free soil testing and advisory",
+    "benefit_description": "Free soil testing every 2 years, crop-specific fertilizer recommendations, and guidance for soil improvement",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": false}
+    ],
+    "how_to_apply": "Register on Soil Health Card portal or visit nearest Krishi Vigyan Kendra → Soil sample collected → Tested → Card issued with recommendations"
+  },
+  {
+    "scheme_id": "AGRI005",
+    "name": "PM Kisan MaanDhan Yojana (Pension Scheme)",
+    "description": "Voluntary pension scheme for small and marginal farmers aged 18-40 years to receive ₹3,000/month pension after age 60.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://maandhan.in/",
+    "status": "active",
+    "benefit_amount": "₹3,000 per month after age 60",
+    "benefit_description": "Monthly contribution ₹55-200 (based on age). Government matches contribution equally. ₹3,000/month pension after 60.",
+    "eligibility_criteria": {
+      "min_age": 18,
+      "max_age": 40,
+      "max_income": 500000,
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Visit CSC center → Register with Aadhaar → Select monthly contribution → Auto-debit from bank → Pension from age 60"
+  },
+  {
+    "scheme_id": "AGRI006",
+    "name": "National Mission on Sustainable Agriculture (NMSA)",
+    "description": "Promotes sustainable agriculture through climate change adaptation, soil health management, and rainfed area development.",
+    "category": "agriculture",
+    "state": "all",
+    "ministry": "Ministry of Agriculture & Farmer Welfare",
+    "portal_url": "https://nmsa.dac.gov.in/",
+    "status": "active",
+    "benefit_amount": "Subsidies up to 50-90% on various components",
+    "benefit_description": "Subsidies on micro-irrigation, organic farming, soil conservation, water harvesting. Up to 90% for SC/ST/small farmers.",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"],
+      "occupation": ["farmer"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Apply through State Agriculture Department or DBT Agriculture portal → Submit land details → Approved → Get subsidy"
+  }
+]

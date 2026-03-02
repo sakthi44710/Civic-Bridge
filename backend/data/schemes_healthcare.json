@@ -1,0 +1,156 @@
+[
+  {
+    "scheme_id": "HEALTH001",
+    "name": "Ayushman Bharat - Pradhan Mantri Jan Arogya Yojana (PM-JAY)",
+    "description": "World's largest health assurance scheme providing free health coverage of ₹5 lakhs per family per year for secondary and tertiary care hospitalization.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Ministry of Health and Family Welfare",
+    "portal_url": "https://pmjay.gov.in/",
+    "status": "active",
+    "benefit_amount": "₹5,00,000 per family per year",
+    "benefit_description": "Cashless and paperless health coverage at empanelled hospitals. Covers pre and post hospitalization expenses for 3 and 15 days respectively.",
+    "eligibility_criteria": {
+      "max_income": 300000,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "ration_card", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": false}
+    ],
+    "how_to_apply": "Visit nearest Ayushman Bharat Kendra / CSC center → Verify eligibility using SECC data → Get e-card if eligible → Use at empanelled hospitals",
+    "automation_config": {
+      "portal": "pmjay",
+      "pages": [
+        {
+          "name": "Beneficiary Registration",
+          "url": "https://beneficiary.nha.gov.in/",
+          "fields": [
+            {"field_name": "name", "source": "profile.name", "type": "text"},
+            {"field_name": "aadhaar", "source": "aadhaar.number", "type": "text"},
+            {"field_name": "mobile", "source": "profile.phone", "type": "text"},
+            {"field_name": "state", "source": "profile.state", "type": "select"},
+            {"field_name": "district", "source": "profile.district", "type": "text"},
+            {"field_name": "rationCardNo", "source": "ration_card.number", "type": "text"}
+          ]
+        },
+        {
+          "name": "Family Details",
+          "url": "https://beneficiary.nha.gov.in/",
+          "fields": [
+            {"field_name": "familyHead", "source": "profile.father_name", "type": "text"},
+            {"field_name": "familySize", "source": "profile.family_size", "type": "text"},
+            {"field_name": "address", "source": "profile.address", "type": "textarea"},
+            {"field_name": "pincode", "source": "profile.pincode", "type": "text"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "scheme_id": "HEALTH002",
+    "name": "Pradhan Mantri Surakshit Matritva Abhiyan (PMSMA)",
+    "description": "Free antenatal check-ups for pregnant women on the 9th of every month at government health facilities and designated private hospitals.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Ministry of Health and Family Welfare",
+    "portal_url": "https://pmsma.nhp.gov.in/",
+    "status": "active",
+    "benefit_amount": "Free antenatal care",
+    "benefit_description": "Free comprehensive antenatal check-up including ultrasound, blood tests, and specialist consultation on 9th of every month",
+    "eligibility_criteria": {
+      "gender": ["female"],
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "pregnancy_card", "mandatory": false}
+    ],
+    "how_to_apply": "Visit nearest government hospital or designated facility on 9th of any month → Register → Get free antenatal check-up"
+  },
+  {
+    "scheme_id": "HEALTH003",
+    "name": "Janani Suraksha Yojana (JSY)",
+    "description": "Cash assistance to pregnant women for delivery and post-delivery care to reduce maternal and infant mortality.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Ministry of Health and Family Welfare",
+    "portal_url": "https://nhm.gov.in/index4.php?lang=1&level=0&linkid=134&lid=182",
+    "status": "active",
+    "benefit_amount": "₹600 - ₹1,400 (rural) / ₹600 - ₹1,000 (urban)",
+    "benefit_description": "Cash assistance for institutional delivery. Rs 1400 in LPS states (rural), Rs 1000 (urban). BPL/SC/ST eligible.",
+    "eligibility_criteria": {
+      "gender": ["female"],
+      "min_age": 19,
+      "max_income": 300000,
+      "categories": ["sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "bpl_certificate", "mandatory": false},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Register at nearest government hospital/PHC/CHC → Get MCH card → Deliver at registered institution → Cash benefit transferred to bank account"
+  },
+  {
+    "scheme_id": "HEALTH004",
+    "name": "Rashtriya Swasthya Bima Yojana (RSBY)",
+    "description": "Health insurance scheme for Below Poverty Line (BPL) families providing cashless hospitalization coverage.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Ministry of Labour and Employment",
+    "portal_url": "https://www.india.gov.in/spotlight/rashtriya-swasthya-bima-yojana",
+    "status": "active",
+    "benefit_amount": "₹30,000 per family per year",
+    "benefit_description": "Smart card based cashless health insurance. Covers hospitalization expenses up to ₹30,000 for a family of 5.",
+    "eligibility_criteria": {
+      "max_income": 200000,
+      "categories": ["sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "bpl_certificate", "mandatory": true},
+      {"document_type": "ration_card", "mandatory": true}
+    ],
+    "how_to_apply": "Visit enrollment station during camp → Biometric enrollment → Get smart card → Use at empanelled hospitals"
+  },
+  {
+    "scheme_id": "HEALTH005",
+    "name": "Pradhan Mantri Jan Aushadhi Yojana (PMJAY)",
+    "description": "Making quality medicines available at affordable prices through dedicated Jan Aushadhi Kendras across the country.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Department of Pharmaceuticals",
+    "portal_url": "https://janaushadhi.gov.in/",
+    "status": "active",
+    "benefit_amount": "50-90% savings on medicine costs",
+    "benefit_description": "Generic medicines at 50-90% less than branded equivalents. Over 1800 medicines and 285 surgical items available.",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "prescription", "mandatory": true}
+    ],
+    "how_to_apply": "Locate nearest Jan Aushadhi Kendra → Present doctor's prescription → Purchase generic medicines at subsidized rates"
+  },
+  {
+    "scheme_id": "HEALTH006",
+    "name": "Ayushman Bharat Health and Wellness Centres (AB-HWC)",
+    "description": "Transformation of existing Sub Centres and Primary Health Centres into Health and Wellness Centres providing comprehensive primary healthcare.",
+    "category": "healthcare",
+    "state": "all",
+    "ministry": "Ministry of Health and Family Welfare",
+    "portal_url": "https://ab-hwc.nhp.gov.in/",
+    "status": "active",
+    "benefit_amount": "Free comprehensive primary healthcare",
+    "benefit_description": "12 types of free services including maternal health, child health, chronic disease management, dental care, mental health, and free essential medicines",
+    "eligibility_criteria": {
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true}
+    ],
+    "how_to_apply": "Visit nearest Health and Wellness Centre → Register with Aadhaar → Access free primary healthcare services"
+  }
+]

@@ -1,0 +1,207 @@
+[
+  {
+    "scheme_id": "WELF001",
+    "name": "Mahatma Gandhi National Rural Employment Guarantee Act (MGNREGA)",
+    "description": "Guarantees 100 days of wage employment per year to every rural household whose adult members volunteer to do unskilled manual work.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Rural Development",
+    "portal_url": "https://nrega.nic.in/",
+    "status": "active",
+    "benefit_amount": "₹267-374/day (varies by state)",
+    "benefit_description": "100 days guaranteed employment per household. Daily wages vary by state (₹267-374). Unemployment allowance if work not provided within 15 days.",
+    "eligibility_criteria": {
+      "min_age": 18,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "ration_card", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "passport_photo", "mandatory": true}
+    ],
+    "how_to_apply": "Apply at Gram Panchayat → Get Job Card → Demand work → Get employed within 15 days → Wages credited to bank",
+    "automation_config": {
+      "portal": "nrega",
+      "pages": [
+        {
+          "name": "Job Card Registration",
+          "url": "https://nrega.nic.in/",
+          "fields": [
+            {"field_name": "headName", "source": "profile.name", "type": "text"},
+            {"field_name": "age", "source": "profile.age", "type": "text"},
+            {"field_name": "gender", "source": "profile.gender", "type": "select"},
+            {"field_name": "aadhaar", "source": "aadhaar.number", "type": "text"},
+            {"field_name": "state", "source": "profile.state", "type": "select"},
+            {"field_name": "district", "source": "profile.district", "type": "select"},
+            {"field_name": "block", "source": "profile.block", "type": "select"},
+            {"field_name": "panchayat", "source": "profile.panchayat", "type": "select"},
+            {"field_name": "bankAccount", "source": "profile.bank_account", "type": "text"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "scheme_id": "WELF002",
+    "name": "Pradhan Mantri Awas Yojana - Gramin (PMAY-G)",
+    "description": "Financial assistance for construction of pucca houses to eligible rural households who are houseless or living in kutcha/dilapidated houses.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Rural Development",
+    "portal_url": "https://pmayg.nic.in/",
+    "status": "active",
+    "benefit_amount": "₹1.20 lakhs (plains) / ₹1.30 lakhs (hilly/difficult areas)",
+    "benefit_description": "Financial assistance + 90 days MGNREGA wages. Beneficiary selected from SECC 2011 data. Geo-tagged construction monitoring.",
+    "eligibility_criteria": {
+      "max_income": 300000,
+      "categories": ["sc", "st", "obc", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "bpl_certificate", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "land_record", "mandatory": true}
+    ],
+    "how_to_apply": "Auto-selected from SECC data → Verified by Gram Sabha → Sanctioned by Block → Construction started → Installments released on progress"
+  },
+  {
+    "scheme_id": "WELF003",
+    "name": "Pradhan Mantri Awas Yojana - Urban (PMAY-U)",
+    "description": "Affordable housing for urban poor under 'Housing for All' mission with interest subsidy on home loans.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Housing and Urban Affairs",
+    "portal_url": "https://pmaymis.gov.in/",
+    "status": "active",
+    "benefit_amount": "Interest subsidy up to ₹2.67 lakhs",
+    "benefit_description": "6.5% interest subsidy for EWS/LIG (up to ₹6 lakh loan). 4% for MIG-I (up to ₹9 lakh). 3% for MIG-II (up to ₹12 lakh).",
+    "eligibility_criteria": {
+      "max_income": 1800000,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "address_proof", "mandatory": true}
+    ],
+    "how_to_apply": "Apply online at PMAY-U portal or through CSC → Select CLSS component → Apply through lending institution → Get interest subsidy"
+  },
+  {
+    "scheme_id": "WELF004",
+    "name": "National Social Assistance Programme (NSAP) - Old Age Pension",
+    "description": "Monthly pension to destitute elderly persons aged 60+ years belonging to BPL families under Indira Gandhi National Old Age Pension Scheme.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Rural Development",
+    "portal_url": "https://nsap.nic.in/",
+    "status": "active",
+    "benefit_amount": "₹200-500/month (central) + state contribution",
+    "benefit_description": "Central: ₹200/month (60-79 years), ₹500/month (80+ years). States add their own contribution making total ₹1000-3000/month.",
+    "eligibility_criteria": {
+      "min_age": 60,
+      "max_income": 200000,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "age_proof", "mandatory": true},
+      {"document_type": "bpl_certificate", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Apply at Gram Panchayat / ULB → Verified by Block/Municipality → Sanctioned by District → Monthly pension credited to bank"
+  },
+  {
+    "scheme_id": "WELF005",
+    "name": "Pradhan Mantri Ujjwala Yojana 2.0",
+    "description": "Free LPG connection to women from BPL households to replace unclean cooking fuels and improve health.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Petroleum and Natural Gas",
+    "portal_url": "https://www.pmuy.gov.in/",
+    "status": "active",
+    "benefit_amount": "Free LPG connection + first refill + stove",
+    "benefit_description": "Free deposit-free LPG connection, first refill, and hot plate (stove) to eligible women. ₹1,600 per connection.",
+    "eligibility_criteria": {
+      "gender": ["female"],
+      "max_income": 200000,
+      "categories": ["sc", "st", "obc", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "ration_card", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Visit nearest LPG distributor → Fill Ujjwala 2.0 form → Submit Aadhaar + ration card → Get free LPG connection"
+  },
+  {
+    "scheme_id": "WELF006",
+    "name": "Pradhan Mantri Mudra Yojana (PMMY)",
+    "description": "Collateral-free loans up to ₹10 lakhs for micro/small enterprises under three categories: Shishu, Kishore, and Tarun.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Finance",
+    "portal_url": "https://www.mudra.org.in/",
+    "status": "active",
+    "benefit_amount": "Loans up to ₹10 lakhs without collateral",
+    "benefit_description": "Shishu: up to ₹50,000 | Kishore: ₹50,001-5,00,000 | Tarun: ₹5,00,001-10,00,000. No collateral, no processing fee.",
+    "eligibility_criteria": {
+      "min_age": 18,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "pan_card", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "business_plan", "mandatory": false},
+      {"document_type": "address_proof", "mandatory": true}
+    ],
+    "how_to_apply": "Visit any bank/NBFC/MFI → Fill MUDRA loan application → Submit KYC documents → Bank processes → Loan sanctioned"
+  },
+  {
+    "scheme_id": "WELF007",
+    "name": "Sukanya Samriddhi Yojana",
+    "description": "Government savings scheme for the girl child offering high interest rates and tax benefits. Account for girls below 10 years.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Finance",
+    "portal_url": "https://www.nsiindia.gov.in/",
+    "status": "active",
+    "benefit_amount": "8.2% interest (tax-free) compounded annually",
+    "benefit_description": "Minimum ₹250/year, maximum ₹1.5 lakh/year. Matures when girl turns 21. Partial withdrawal at 18 for higher education.",
+    "eligibility_criteria": {
+      "gender": ["female"],
+      "max_age": 10,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "birth_certificate", "mandatory": true},
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "pan_card", "mandatory": false}
+    ],
+    "how_to_apply": "Visit any post office or authorized bank → Fill SSY form → Submit birth certificate of girl child → Open account with minimum ₹250"
+  },
+  {
+    "scheme_id": "WELF008",
+    "name": "PM Vishwakarma Yojana",
+    "description": "End-to-end support for traditional artisans and craftspeople through recognition, skill training, toolkit incentives, and credit support.",
+    "category": "welfare",
+    "state": "all",
+    "ministry": "Ministry of Micro, Small and Medium Enterprises",
+    "portal_url": "https://pmvishwakarma.gov.in/",
+    "status": "active",
+    "benefit_amount": "₹15,000 toolkit + ₹3 lakh loan at 5%",
+    "benefit_description": "PM Vishwakarma Certificate, ₹500/day training stipend, ₹15,000 free toolkit, loans at 5% (₹1L then ₹2L), digital marketing support.",
+    "eligibility_criteria": {
+      "min_age": 18,
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "passport_photo", "mandatory": true}
+    ],
+    "how_to_apply": "Register on PM Vishwakarma portal → Verified by Gram Panchayat/ULB → Skill training → Get toolkit and credit support"
+  }
+]

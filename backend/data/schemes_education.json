@@ -1,0 +1,225 @@
+[
+  {
+    "scheme_id": "EDU001",
+    "name": "PM Vidyalaxmi - Central Sector Interest Subsidy Scheme",
+    "description": "Interest subsidy on education loans for students from economically weaker sections pursuing higher education in recognized institutions.",
+    "category": "education",
+    "state": "all",
+    "ministry": "Ministry of Education",
+    "portal_url": "https://www.vidyalakshmi.co.in/",
+    "status": "active",
+    "benefit_amount": "Full interest subsidy during moratorium period + 1 year",
+    "benefit_description": "Full interest subsidy on education loan up to ₹10 lakhs for students with family income below ₹4.5 lakhs per annum",
+    "eligibility_criteria": {
+      "max_income": 450000,
+      "education_level": ["12th_pass", "graduate", "post_graduate"],
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "admission_letter", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Register on Vidya Lakshmi Portal → Search for education loans → Fill application → Upload documents → Submit to selected banks",
+    "automation_config": {
+      "portal": "vidyalakshmi",
+      "pages": [
+        {
+          "name": "Student Registration",
+          "url": "https://www.vidyalakshmi.co.in/Students/signup",
+          "fields": [
+            {"field_name": "studentName", "source": "profile.name", "type": "text"},
+            {"field_name": "dob", "source": "profile.dob", "type": "date"},
+            {"field_name": "gender", "source": "profile.gender", "type": "select"},
+            {"field_name": "mobile", "source": "profile.phone", "type": "text"},
+            {"field_name": "email", "source": "profile.email", "type": "email"},
+            {"field_name": "aadhaarNo", "source": "aadhaar.number", "type": "text"},
+            {"field_name": "state", "source": "profile.state", "type": "select"},
+            {"field_name": "pincode", "source": "profile.pincode", "type": "text"}
+          ]
+        },
+        {
+          "name": "Course & Institution Details",
+          "url": "https://www.vidyalakshmi.co.in/Students/coursedetails",
+          "fields": [
+            {"field_name": "courseName", "source": "education.course_name", "type": "text"},
+            {"field_name": "institutionName", "source": "education.institution", "type": "text"},
+            {"field_name": "courseDuration", "source": "education.duration", "type": "text"},
+            {"field_name": "annualFee", "source": "education.annual_fee", "type": "text"}
+          ]
+        },
+        {
+          "name": "Family & Financial Details",
+          "url": "https://www.vidyalakshmi.co.in/Students/familydetails",
+          "fields": [
+            {"field_name": "fatherName", "source": "profile.father_name", "type": "text"},
+            {"field_name": "motherName", "source": "profile.mother_name", "type": "text"},
+            {"field_name": "annualIncome", "source": "profile.income", "type": "text"},
+            {"field_name": "category", "source": "profile.category", "type": "select"},
+            {"field_name": "bankAccount", "source": "profile.bank_account", "type": "text"},
+            {"field_name": "ifsc", "source": "profile.ifsc", "type": "text"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "scheme_id": "EDU002",
+    "name": "Post Matric Scholarship for SC Students",
+    "description": "Scholarship for Scheduled Caste students studying at post-matriculation level to pursue higher education.",
+    "category": "education",
+    "state": "all",
+    "ministry": "Ministry of Social Justice and Empowerment",
+    "portal_url": "https://scholarships.gov.in/",
+    "status": "active",
+    "benefit_amount": "Up to ₹1,200/month maintenance + full tuition fees",
+    "benefit_description": "Maintenance allowance, tuition fees, and other compulsory non-refundable fees for SC students",
+    "eligibility_criteria": {
+      "max_income": 250000,
+      "categories": ["sc"],
+      "education_level": ["10th_pass", "12th_pass", "graduate", "post_graduate"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "caste_certificate", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Login to National Scholarship Portal → New Registration → Fill Academic & Personal Details → Upload Documents → Submit",
+    "automation_config": {
+      "portal": "nsp",
+      "pages": [
+        {
+          "name": "Personal Details",
+          "url": "https://scholarships.gov.in",
+          "fields": [
+            {"field_name": "name", "source": "profile.name", "type": "text"},
+            {"field_name": "dob", "source": "profile.dob", "type": "date"},
+            {"field_name": "gender", "source": "profile.gender", "type": "select"},
+            {"field_name": "mobile", "source": "profile.phone", "type": "text"},
+            {"field_name": "aadhaar", "source": "aadhaar.number", "type": "text"},
+            {"field_name": "category", "source": "profile.category", "type": "select"},
+            {"field_name": "state", "source": "profile.state", "type": "select"},
+            {"field_name": "district", "source": "profile.district", "type": "text"}
+          ]
+        },
+        {
+          "name": "Academic Details",
+          "url": "https://scholarships.gov.in",
+          "fields": [
+            {"field_name": "instituteName", "source": "education.institution", "type": "text"},
+            {"field_name": "courseName", "source": "education.course_name", "type": "text"},
+            {"field_name": "yearOfStudy", "source": "education.year", "type": "select"},
+            {"field_name": "percentage", "source": "education.percentage", "type": "text"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "scheme_id": "EDU003",
+    "name": "National Means-cum-Merit Scholarship (NMMSS)",
+    "description": "Scholarship for meritorious students from economically weaker sections to reduce dropouts at Class 8 and encourage them to continue studying at secondary stage.",
+    "category": "education",
+    "state": "all",
+    "ministry": "Ministry of Education",
+    "portal_url": "https://scholarships.gov.in/",
+    "status": "active",
+    "benefit_amount": "₹12,000 per annum",
+    "benefit_description": "₹12,000 per year from Class 9 to Class 12 for students who cleared the selection test at Class 8 level",
+    "eligibility_criteria": {
+      "max_income": 350000,
+      "min_age": 13,
+      "max_age": 18,
+      "education_level": ["8th_pass", "10th_pass"],
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Apply through National Scholarship Portal during open window → Fill details → Upload documents → Submit"
+  },
+  {
+    "scheme_id": "EDU004",
+    "name": "Prime Minister's Special Scholarship Scheme (PMSSS)",
+    "description": "Scholarship for students from Jammu & Kashmir and Ladakh to pursue undergraduate studies in colleges/institutions across India.",
+    "category": "education",
+    "state": "all",
+    "ministry": "All India Council for Technical Education (AICTE)",
+    "portal_url": "https://www.aicte-jk-scholarship-gov.in/",
+    "status": "active",
+    "benefit_amount": "Up to ₹3 lakhs per annum (engineering) / ₹30,000 maintenance",
+    "benefit_description": "Full tuition fee coverage + ₹1 lakh/year maintenance for engineering; ₹30,000/year for general courses",
+    "eligibility_criteria": {
+      "max_income": 800000,
+      "states": ["jammu_kashmir", "ladakh"],
+      "education_level": ["12th_pass"],
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "domicile_certificate", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Register on AICTE-PMSSS portal → Fill application → Upload documents → Select colleges → Submit"
+  },
+  {
+    "scheme_id": "EDU005",
+    "name": "Pragati Scholarship for Girls (AICTE)",
+    "description": "Scholarship for girls from economically weaker families pursuing technical education (degree/diploma) in AICTE approved institutions.",
+    "category": "education",
+    "state": "all",
+    "ministry": "All India Council for Technical Education (AICTE)",
+    "portal_url": "https://www.aicte-india.org/schemes/students-development-schemes/Pragati",
+    "status": "active",
+    "benefit_amount": "₹50,000 per annum",
+    "benefit_description": "₹50,000 per year for tuition fee, books, equipment. Up to 2 girls per family.",
+    "eligibility_criteria": {
+      "max_income": 800000,
+      "gender": ["female"],
+      "education_level": ["12th_pass", "10th_pass"],
+      "categories": ["general", "obc", "sc", "st", "ews"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true},
+      {"document_type": "admission_letter", "mandatory": true}
+    ],
+    "how_to_apply": "Visit AICTE portal → Register → Fill scholarship form → Upload documents → Submit online"
+  },
+  {
+    "scheme_id": "EDU006",
+    "name": "National Fellowship for OBC Students",
+    "description": "Fellowship for OBC candidates to pursue M.Phil and Ph.D degrees in sciences, humanities, social sciences, and engineering.",
+    "category": "education",
+    "state": "all",
+    "ministry": "Ministry of Social Justice and Empowerment",
+    "portal_url": "https://nfobc.ugc.ac.in/",
+    "status": "active",
+    "benefit_amount": "₹31,000/month (JRF) → ₹35,000/month (SRF) + HRA + contingency",
+    "benefit_description": "Monthly fellowship + House Rent Allowance + ₹20,500/year contingency for humanities, ₹25,000/year for sciences",
+    "eligibility_criteria": {
+      "max_income": 800000,
+      "categories": ["obc"],
+      "education_level": ["post_graduate"]
+    },
+    "required_documents": [
+      {"document_type": "aadhaar", "mandatory": true},
+      {"document_type": "caste_certificate", "mandatory": true},
+      {"document_type": "income_certificate", "mandatory": true},
+      {"document_type": "marksheet", "mandatory": true},
+      {"document_type": "bank_passbook", "mandatory": true}
+    ],
+    "how_to_apply": "Apply through UGC portal during announcement → Fill application → Submit with required documents"
+  }
+]
