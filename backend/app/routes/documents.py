@@ -27,11 +27,18 @@ async def upload_document(
         raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
     
     allowed_types = [
-        "application/pdf", "image/jpeg", "image/png", "image/jpg",
-        "image/tiff", "image/bmp", "image/webp"
+        "application/pdf",
+        "image/jpeg", "image/png", "image/jpg", "image/tiff", "image/bmp", "image/webp",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+        "application/msword",  # .doc
+        "application/octet-stream",  # some browsers send this for pdf/docx
     ]
-    if file.content_type and file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
+    filename_lower = (file.filename or "").lower()
+    # Also allow by extension if content_type is generic
+    allowed_extensions = {".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp", ".docx", ".doc"}
+    ext = "." + filename_lower.rsplit(".", 1)[-1] if "." in filename_lower else ""
+    if (file.content_type and file.content_type not in allowed_types and ext not in allowed_extensions):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: PDF, JPG, PNG, DOCX")
     
     try:
         result = document_service.process_document(
@@ -46,9 +53,7 @@ async def upload_document(
         logger.error(f"Document processing error: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
     
-    if result.get("status") == "duplicate":
-        raise HTTPException(status_code=409, detail=result)
-    
+    # Return duplicate as a normal 200 response so the frontend can show a friendly message
     return result
 
 

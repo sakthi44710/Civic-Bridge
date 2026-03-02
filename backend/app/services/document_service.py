@@ -1,7 +1,8 @@
 """
 Document Service - Orchestrates Document Processing Pipeline
-Upload → S3 → OCR (Textract) → Entity Extraction (Comprehend) → Classification (Bedrock) → RAG Store
+Upload → S3 → OCR (Textract / docx parser) → Entity Extraction (Comprehend) → Classification (Bedrock) → RAG Store
 """
+import io
 import logging
 import json
 from decimal import Decimal
@@ -14,6 +15,27 @@ from app.services.dynamodb_service import db
 from app.utils.helpers import generate_id, file_hash, get_document_category, now_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_docx_text(file_content: bytes) -> str:
+    """Extract plain text from a .docx file using python-docx."""
+    try:
+        import docx  # python-docx
+        doc = docx.Document(io.BytesIO(file_content))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        # Also get text from tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        paragraphs.append(cell.text.strip())
+        return "\n".join(paragraphs)
+    except ImportError:
+        logger.warning("python-docx not installed; cannot extract text from .docx files")
+        return ""
+    except Exception as e:
+        logger.error(f"docx text extraction failed: {e}")
+        return ""
 
 
 def _sanitize_for_dynamo(obj: Any) -> Any:
@@ -52,11 +74,18 @@ class DocumentService:
         s3_key = f"documents/{user_id}/{document_id}.{ext}"
         s3_service.upload_file(file_content, s3_key, content_type)
         
-        # Step 3: OCR with Textract
+        # Step 3: OCR / text extraction
+        # .docx files → python-docx; images/PDFs → AWS Textract
+        ext_lower = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+        is_docx = ext_lower in ("docx", "doc") or "wordprocessingml" in (content_type or "")
         try:
-            ocr_result = textract_service.extract_text(file_content)
-            ocr_text = ocr_result.get("full_text", "")
-            ocr_confidence = ocr_result.get("confidence", 0)
+            if is_docx:
+                ocr_text = _extract_docx_text(file_content)
+                ocr_confidence = 100 if ocr_text else 0
+            else:
+                ocr_result = textract_service.extract_text(file_content)
+                ocr_text = ocr_result.get("full_text", "")
+                ocr_confidence = ocr_result.get("confidence", 0)
         except Exception as e:
             logger.error(f"OCR failed: {e}")
             ocr_text = ""

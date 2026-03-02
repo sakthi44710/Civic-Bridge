@@ -96,6 +96,19 @@ export default function VoiceChat() {
     try {
       const resp = await documentsAPI.upload(file);
       const data = resp.data;
+
+      // Handle duplicate case (backend returns 200 with status=duplicate)
+      if (data.status === 'duplicate') {
+        toast('📄 This document is already in your vault', {
+          icon: 'ℹ️',
+          style: { background: '#1a1a2e', color: '#8888aa', border: '1px solid #2a2a3a' },
+          duration: 3000,
+        });
+        setUploading(false);
+        if (fileRef.current) fileRef.current.value = '';
+        return;
+      }
+
       const docType = data.document_type || 'document';
       const aiName = data.ai_generated_name || file.name;
       const extracted = data.extracted_data || {};
@@ -113,7 +126,7 @@ export default function VoiceChat() {
       const docMsg = `I just uploaded my ${docType.replace(/_/g, ' ')} document: "${aiName}". ${
         Object.keys(extracted).length > 0
           ? `Extracted: ${JSON.stringify(extracted, null, 0)}`
-          : 'OCR could not extract text (low quality scan).'
+          : 'OCR could not extract text (low quality scan or unsupported format).'
       } Please acknowledge this and let me know what schemes I can now apply for.`;
       
       setMessages(p => [...p, { role: 'user', content: `📄 Uploaded: ${aiName}`, timestamp: new Date().toISOString() }]);
@@ -134,8 +147,12 @@ export default function VoiceChat() {
       
       loadDocCount();
     } catch (err) {
-      const detail = err.response?.data?.detail || err.message || 'Upload failed';
-      toast.error(`Upload failed: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+      const detail = err.response?.data?.detail;
+      // Show clean, human-friendly error
+      const errMsg = typeof detail === 'string'
+        ? detail
+        : detail?.message || err.message || 'Upload failed';
+      toast.error(errMsg);
     }
     setUploading(false);
     if (fileRef.current) fileRef.current.value = '';
@@ -306,7 +323,7 @@ export default function VoiceChat() {
                 <span className="text-2xl font-bold text-[#00d4ff]">{docCount}</span>
                 <p className="text-[9px] text-white/20 mt-0.5">Total uploaded</p>
               </div>
-              <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png" />
+              <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc" />
               <button onClick={() => fileRef.current?.click()} disabled={uploading}
                 className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.02] border border-dashed border-white/[0.06] text-white/30 hover:text-[#00d4ff] hover:border-[#00d4ff]/20 transition-all text-[10px] font-medium disabled:opacity-40">
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
