@@ -277,10 +277,27 @@ async def _handle_audio_chunk(websocket: WebSocket, state: dict, msg: dict):
 
 
 async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
-    """Handle text message from the client (typed input)."""
+    """Handle text message from the client (typed or speech-recognised input).
+    Serialised: if another message is already being processed we buffer this one
+    and merge it so the user never gets duplicate parallel responses."""
     text = msg.get("data", "").strip()
     if not text:
         return
+
+    # ── Serialise: only one AI call at a time per session ──────────
+    if state.get("_text_processing"):
+        # Another request is in-flight — append to pending buffer
+        state.setdefault("_text_pending", [])
+        state["_text_pending"].append(text)
+        logger.debug("Text message queued (AI busy): %s", text[:60])
+        return
+
+    state["_text_processing"] = True
+
+    # Merge any previously-queued text that arrived while we were busy
+    pending = state.pop("_text_pending", [])
+    if pending:
+        text = " ".join(pending) + " " + text
 
     await websocket.send_json({"type": "status", "status": "processing"})
 
@@ -357,8 +374,19 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
         asyncio.ensure_future(_save_message(state, "user", text))
         asyncio.ensure_future(_save_message(state, "assistant", ai_response))
 
+        # Drain any text that queued up while we were processing
+        _drain = state.pop("_text_pending", [])
+        state["_text_processing"] = False
+        if _drain:
+            merged = " ".join(_drain)
+            asyncio.ensure_future(
+                _handle_text_message(websocket, state, {"data": merged})
+            )
+
     except Exception as e:
         logger.error(f"Text message processing error: {e}")
+        state["_text_processing"] = False
+        state.pop("_text_pending", None)
         await websocket.send_json({"type": "error", "message": str(e)})
 
     await websocket.send_json({"type": "status", "status": "listening"})
@@ -491,32 +519,64 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
             pass
 
 
-def _make_tts_text(message: str, max_sentences: int = 3) -> str:
+def _make_tts_text(message: str, max_sentences: int = 2) -> str:
     """
-    Convert an AI markdown message to a clean, spoken-friendly string.
-    - Strips markdown formatting (**, ##, bullets, links)
-    - Strips leaked metadata (Intent:, Suggested Actions:, etc.)
-    - Returns at most max_sentences sentences so speech stays crisp
+    Convert an AI markdown message to a short spoken summary.
+
+    Strategy (voice-friendly):
+      1. Extract **bold / highlighted** key phrases
+      2. Extract concise bullet / numbered-list items
+      3. Fall back to the first 2 sentences if neither exist
+    This keeps speech short so the assistant speaks only the key points.
     """
     if not message:
         return ""
+
+    # ── 0. Strip leaked metadata ─────────────────────
     text = message
-    # Remove leaked metadata lines
     text = re.sub(r'\*{0,2}(Suggested Actions|Suggested Schemes|Intent|Detected Language|Requires Info)\*{0,2}\s*[:\[].*', '', text, flags=re.DOTALL)
     text = re.sub(r'\[\{"type".*?\}\]', '', text, flags=re.DOTALL)
-    # Strip markdown: headers, bold/italic, code, horizontal rules, bullet markers
-    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)   # headers
-    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)      # bold/italic
-    text = re.sub(r'`[^`]*`', '', text)                         # inline code
-    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)       # links → label
-    text = re.sub(r'^[-*>|] *', '', text, flags=re.MULTILINE)   # bullets / blockquote
-    text = re.sub(r'^\d+\.\s+', '', text, flags=re.MULTILINE)   # numbered list markers
-    text = re.sub(r'\n+', ' ', text)                             # flatten newlines
-    text = re.sub(r'\s{2,}', ' ', text).strip()
-    # Split into sentences and take first max_sentences
-    sentence_endings = re.compile(r'(?<=[.!?])\s+')
-    sentences = [s.strip() for s in sentence_endings.split(text) if s.strip()]
-    spoken = ' '.join(sentences[:max_sentences])
+
+    # ── 1. Collect highlighted / bold phrases ────────
+    bold_phrases = re.findall(r'\*{2,3}([^*]{3,})\*{2,3}', text)
+    bold_phrases = [p.strip().rstrip(':').rstrip('.') for p in bold_phrases if len(p.strip()) > 2]
+
+    # ── 2. Collect bullet / numbered-list items (first 4) ────
+    bullet_items = re.findall(r'^\s*(?:[-*•]|\d+[.)])\s+(.+)', text, re.MULTILINE)
+    bullet_items = [b.strip() for b in bullet_items if len(b.strip()) > 3][:4]
+
+    # ── 3. Build spoken text ─────────────────────────
+    # Strip all markdown for the plain version
+    plain = text
+    plain = re.sub(r'^#+\s+', '', plain, flags=re.MULTILINE)
+    plain = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', plain)
+    plain = re.sub(r'`[^`]*`', '', plain)
+    plain = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', plain)
+    plain = re.sub(r'^[-*>|] *', '', plain, flags=re.MULTILINE)
+    plain = re.sub(r'^\d+\.\s+', '', plain, flags=re.MULTILINE)
+    plain = re.sub(r'\n+', ' ', plain)
+    plain = re.sub(r'\s{2,}', ' ', plain).strip()
+
+    # First sentence is the intro / direct answer
+    sentence_end = re.compile(r'(?<=[.!?])\s+')
+    sentences = [s.strip() for s in sentence_end.split(plain) if s.strip()]
+    intro = sentences[0] if sentences else plain[:200]
+
+    if bullet_items:
+        # Speak the intro + up to 4 bullet points
+        points = ', '.join(bullet_items[:4])
+        spoken = f"{intro}. Key points: {points}."
+    elif bold_phrases:
+        # Speak the intro + bold highlights
+        highlights = ', '.join(bold_phrases[:4])
+        spoken = f"{intro}. Highlights: {highlights}."
+    else:
+        # No structure — just the first 2 sentences
+        spoken = ' '.join(sentences[:max_sentences])
+
+    # Hard cap at ~400 chars so Polly is fast
+    if len(spoken) > 400:
+        spoken = spoken[:397].rsplit(' ', 1)[0] + '...'
     return spoken
 
 

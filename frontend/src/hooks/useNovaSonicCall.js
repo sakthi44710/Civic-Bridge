@@ -73,6 +73,8 @@ export default function useNovaSonicCall({
   const recognitionRef = useRef(null);  // Web Speech API recognition instance
   const volAnimRef = useRef(null);       // requestAnimationFrame handle for volume
   const currentAudioRef = useRef(null); // currently-playing MP3 Audio element
+  const sttBufferRef = useRef('');       // accumulates partial STT results
+  const sttTimerRef = useRef(null);      // debounce timer for STT flush
 
   // Keep refs in sync
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
@@ -225,13 +227,22 @@ export default function useNovaSonicCall({
 
         recognition.onresult = (event) => {
           if (!inCallRef.current) return;
-          const last = event.results[event.results.length - 1];
-          if (last.isFinal) {
-            const transcript = last[0].transcript.trim();
-            if (transcript && wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'text_message', data: transcript }));
+          // Collect ALL new final results since last check
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              const t = event.results[i][0].transcript.trim();
+              if (t) sttBufferRef.current += (sttBufferRef.current ? ' ' : '') + t;
             }
           }
+          // Debounce: wait 1.2s of silence then flush all accumulated text as ONE message
+          if (sttTimerRef.current) clearTimeout(sttTimerRef.current);
+          sttTimerRef.current = setTimeout(() => {
+            const fullText = sttBufferRef.current.trim();
+            sttBufferRef.current = '';
+            if (fullText && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'text_message', data: fullText }));
+            }
+          }, 1200);
         };
 
         recognition.onerror = (e) => {
@@ -313,6 +324,13 @@ export default function useNovaSonicCall({
       cancelAnimationFrame(volAnimRef.current);
       volAnimRef.current = null;
     }
+
+    // Flush any remaining STT buffer before stopping
+    if (sttTimerRef.current) { clearTimeout(sttTimerRef.current); sttTimerRef.current = null; }
+    if (sttBufferRef.current.trim() && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'text_message', data: sttBufferRef.current.trim() }));
+    }
+    sttBufferRef.current = '';
 
     // Stop Web Speech API recognition
     if (recognitionRef.current) {
