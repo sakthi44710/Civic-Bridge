@@ -28,7 +28,18 @@ const getWsUrl = () => {
 // Audio processing constants
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE_NOVA = 24000;
-const CHUNK_INTERVAL_MS = 100; // Send audio chunks every 100ms
+const CHUNK_INTERVAL_MS = 100; // Send audio chunks every 100ms (PCM fallback only)
+
+// BCP-47 codes for Web Speech API (primary STT in Chrome/Edge)
+const SPEECH_API_LANGUAGES = {
+  en: 'en-IN', hi: 'hi-IN', ta: 'ta-IN', te: 'te-IN',
+  bn: 'bn-IN', mr: 'mr-IN', gu: 'gu-IN', kn: 'kn-IN',
+  ml: 'ml-IN', pa: 'pa-IN', ur: 'ur-IN', or: 'or-IN',
+  as: 'as-IN', ne: 'ne-IN',
+  // Unsupported by Web Speech API — fall back to Hindi
+  mai: 'hi-IN', sat: 'hi-IN', ks: 'hi-IN', kok: 'hi-IN',
+  sd: 'hi-IN', doi: 'hi-IN', mni: 'hi-IN', brx: 'hi-IN', sa: 'hi-IN',
+};
 
 export default function useNovaSonicCall({
   conversationId,
@@ -59,6 +70,8 @@ export default function useNovaSonicCall({
   const conversationIdRef = useRef(conversationId);
   const languageRef = useRef(language);
   const schemeIdRef = useRef(schemeId);
+  const recognitionRef = useRef(null);  // Web Speech API recognition instance
+  const volAnimRef = useRef(null);       // requestAnimationFrame handle for volume
 
   // Keep refs in sync
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
@@ -160,7 +173,6 @@ export default function useNovaSonicCall({
       // 2. Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: INPUT_SAMPLE_RATE,
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
@@ -169,62 +181,79 @@ export default function useNovaSonicCall({
       });
       streamRef.current = stream;
 
-      // 3. Set up audio processing for PCM capture
+      // 3. AudioContext for volume visualization ONLY (AnalyserNode, no ScriptProcessor)
       const audioContext = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: INPUT_SAMPLE_RATE,
       });
       audioContextRef.current = audioContext;
-
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
-
-      // ScriptProcessor for raw PCM access
-      // (AudioWorklet would be cleaner but ScriptProcessor works everywhere)
-      const bufferSize = 2048;
-      const scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
-      scriptNodeRef.current = scriptNode;
-
-      scriptNode.onaudioprocess = (e) => {
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const volBuf = new Float32Array(analyser.fftSize);
+      const animVol = () => {
         if (!inCallRef.current) return;
-        const inputData = e.inputBuffer.getChannelData(0);
-
-        // Calculate volume for visualization
+        analyser.getFloatTimeDomainData(volBuf);
         let sum = 0;
-        for (let i = 0; i < inputData.length; i++) {
-          sum += Math.abs(inputData[i]);
-        }
-        const avgVolume = (sum / inputData.length) * 200;
-        onVolumeChange?.(avgVolume);
-
-        // Convert Float32 to Int16 PCM
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-
-        // Accumulate chunks
-        audioBufferRef.current.push(pcm16);
+        for (let i = 0; i < volBuf.length; i++) sum += Math.abs(volBuf[i]);
+        onVolumeChange?.(sum / volBuf.length * 200);
+        volAnimRef.current = requestAnimationFrame(animVol);
       };
-
-      source.connect(scriptNode);
-      scriptNode.connect(audioContext.destination);
-
-      // 4. Start periodic chunk sending
-      chunkIntervalRef.current = setInterval(() => {
-        if (!inCallRef.current || !wsRef.current) return;
-        sendAccumulatedAudio();
-      }, CHUNK_INTERVAL_MS);
+      volAnimRef.current = requestAnimationFrame(animVol);
 
       inCallRef.current = true;
 
-      // 5. Send session_start to server
+      // 4. Send session_start to server
       ws.send(JSON.stringify({
         type: 'session_start',
         language: languageRef.current || 'hi',
         conversation_id: conversationIdRef.current || undefined,
         scheme_id: schemeIdRef.current || undefined,
       }));
+
+      // 5. Primary STT: Web Speech API (instant, no server roundtrip)
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      if (SpeechRecognition && !isNovaSonicRef.current) {
+        const recognition = new SpeechRecognition();
+        recognition.lang = SPEECH_API_LANGUAGES[languageRef.current] || 'hi-IN';
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        recognition.onresult = (event) => {
+          if (!inCallRef.current) return;
+          const last = event.results[event.results.length - 1];
+          if (last.isFinal) {
+            const transcript = last[0].transcript.trim();
+            if (transcript && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'text_message', data: transcript }));
+            }
+          }
+        };
+
+        recognition.onerror = (e) => {
+          // 'aborted' is normal on manual stop; 'no-speech' is normal silence
+          if (e.error !== 'aborted' && e.error !== 'no-speech') {
+            console.warn('SpeechRecognition error:', e.error);
+          }
+        };
+
+        recognition.onend = () => {
+          // Auto-restart if still in call (browser stops recognition on silence)
+          if (inCallRef.current && recognitionRef.current) {
+            try { recognition.start(); } catch { /* ignore race */ }
+          }
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+
+      } else {
+        // Fallback: PCM streaming → backend AWS Transcribe (for Nova Sonic or unsupported browsers)
+        _startPCMCapture(stream, audioContext, ws);
+      }
 
       onStatusChange?.('listening');
 
@@ -234,43 +263,63 @@ export default function useNovaSonicCall({
     }
   }, []);
 
-  // ─── Send accumulated audio chunks ─────────────────
-  const sendAccumulatedAudio = useCallback(() => {
-    const chunks = audioBufferRef.current;
-    if (chunks.length === 0) return;
-    audioBufferRef.current = [];
+  // ─── PCM capture fallback (for Nova Sonic path or non-Chrome browsers) ─────
+  const _startPCMCapture = useCallback((stream, audioContext, ws) => {
+    const source = audioContext.createMediaStreamSource(stream);
+    const bufferSize = 2048;
+    const scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+    scriptNodeRef.current = scriptNode;
 
-    // Merge all chunks into one buffer
-    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-    const merged = new Int16Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
+    scriptNode.onaudioprocess = (e) => {
+      if (!inCallRef.current) return;
+      const inputData = e.inputBuffer.getChannelData(0);
+      const pcm16 = new Int16Array(inputData.length);
+      for (let i = 0; i < inputData.length; i++) {
+        const s = Math.max(-1, Math.min(1, inputData[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      audioBufferRef.current.push(pcm16);
+    };
 
-    // Convert to base64
-    const bytes = new Uint8Array(merged.buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const base64 = btoa(binary);
+    source.connect(scriptNode);
+    scriptNode.connect(audioContext.destination);
 
-    // Send via WebSocket
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'audio_chunk',
-        data: base64,
-      }));
-    }
+    chunkIntervalRef.current = setInterval(() => {
+      if (!inCallRef.current || !wsRef.current) return;
+      const chunks = audioBufferRef.current;
+      if (chunks.length === 0) return;
+      audioBufferRef.current = [];
+      const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+      const merged = new Int16Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+      const bytes = new Uint8Array(merged.buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'audio_chunk', data: base64 }));
+      }
+    }, CHUNK_INTERVAL_MS);
   }, []);
 
   // ─── End the call ──────────────────────────────────
   const endCall = useCallback(() => {
     inCallRef.current = false;
 
-    // Stop chunk sending
+    // Stop volume animation
+    if (volAnimRef.current) {
+      cancelAnimationFrame(volAnimRef.current);
+      volAnimRef.current = null;
+    }
+
+    // Stop Web Speech API recognition
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch { /* ignore */ }
+      recognitionRef.current = null;
+    }
+
+    // Stop PCM chunk sending (fallback path)
     if (chunkIntervalRef.current) {
       clearInterval(chunkIntervalRef.current);
       chunkIntervalRef.current = null;

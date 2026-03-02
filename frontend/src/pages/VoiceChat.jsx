@@ -546,7 +546,7 @@ export default function VoiceChat() {
               <div>
                 <h3 className="text-white/80 font-semibold text-[13px]">AI Chat</h3>
                 <p className="text-white/20 text-[10px]">
-                  {status === 'speaking' ? 'Speaking...' : status === 'listening' ? 'Listening...' : 'Ready'}
+                  {status === 'speaking' ? 'Speaking...' : status === 'listening' ? 'Listening...' : status === 'processing' ? 'Thinking...' : 'Ready'}
                 </p>
               </div>
             </div>
