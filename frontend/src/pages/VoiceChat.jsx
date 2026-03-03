@@ -345,145 +345,190 @@ export default function VoiceChat() {
       {/* ═══ MAIN CONTENT ═══ */}
       <div className="flex-1 flex overflow-hidden relative z-10">
 
-        {/* ═══ LEFT COLUMN ═══ */}
-        <div className="w-[420px] border-r border-white/[0.04] flex flex-col bg-[#060609]/60 backdrop-blur-sm overflow-y-auto scrollbar-thin">
-          {/* Top row: 3 cards side by side */}
-          <div className="p-3 flex gap-2.5">
-            {/* Profile Status Card */}
-            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Profile Status</span>
-                <button onClick={() => navigate('/profile')} className="text-[9px] text-[#00d4ff]/60 hover:text-[#00d4ff] transition-colors font-medium">→</button>
-              </div>
-              <div className="flex justify-center">
-                <div className="relative">
-                  <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
-                    <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="2.5" />
-                    <circle cx="18" cy="18" r="14" fill="none" stroke="url(#pg)" strokeWidth="2.5"
-                      strokeDasharray={`${profileCompletion} ${100 - profileCompletion}`} strokeLinecap="round" />
-                    <defs><linearGradient id="pg" x1="0" y1="0" x2="1" y2="1">
-                      <stop offset="0%" stopColor="#00d4ff" /><stop offset="100%" stopColor="#00cc88" />
-                    </linearGradient></defs>
+        {/* ═══ LEFT COLUMN — Live Browser Projection ═══ */}
+        <div className="w-[420px] border-r border-white/[0.04] flex flex-col bg-[#060609]/60 backdrop-blur-sm overflow-hidden">
+
+          {/* ── Compact info row (always visible) ── */}
+          <div className={`flex gap-2 p-2 border-b border-white/[0.04] shrink-0 ${formScreenshot ? '' : 'p-3'}`}>
+            {formScreenshot ? (
+              /* When form is active: thin horizontal bar */
+              <>
+                <button onClick={() => navigate('/profile')} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] hover:border-[#00d4ff]/20 transition-all">
+                  <svg className="w-3 h-3 text-[#00d4ff]/60 -rotate-90" viewBox="0 0 36 36">
+                    <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="3" />
+                    <circle cx="18" cy="18" r="14" fill="none" stroke="#00d4ff" strokeWidth="3" strokeDasharray={`${profileCompletion} ${100-profileCompletion}`} strokeLinecap="round" />
                   </svg>
-                  <span className="absolute inset-0 flex items-center justify-center text-[13px] text-white font-bold">{profileCompletion}%</span>
+                  <span className="text-[9px] text-white/40">{profileCompletion}%</span>
+                </button>
+                <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                  <span className="text-[#00d4ff] text-[11px] font-bold">{docCount}</span>
+                  <span className="text-[9px] text-white/25">docs</span>
                 </div>
-              </div>
-            </div>
+                <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc" />
+                <button onClick={() => fileRef.current?.click()} disabled={uploading}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-dashed border-white/[0.06] text-white/30 hover:text-[#00d4ff] hover:border-[#00d4ff]/20 transition-all text-[9px]">
+                  {uploading ? '...' : '↑ Upload'}
+                </button>
+                <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1.5">
+                  <div className={`w-1.5 h-1.5 rounded-full ${conversationId ? 'bg-[#00cc88]' : 'bg-white/10'}`} />
+                  <span className="text-[9px] text-white/30 truncate max-w-[80px]">{currentAppName}</span>
+                </div>
+              </>
+            ) : (
+              /* When no form: full 3 cards (original) */
+              <>
+                {/* Profile Status Card */}
+                <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Profile Status</span>
+                    <button onClick={() => navigate('/profile')} className="text-[9px] text-[#00d4ff]/60 hover:text-[#00d4ff] transition-colors font-medium">→</button>
+                  </div>
+                  <div className="flex justify-center">
+                    <div className="relative">
+                      <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
+                        <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="2.5" />
+                        <circle cx="18" cy="18" r="14" fill="none" stroke="url(#pg)" strokeWidth="2.5"
+                          strokeDasharray={`${profileCompletion} ${100 - profileCompletion}`} strokeLinecap="round" />
+                        <defs><linearGradient id="pg" x1="0" y1="0" x2="1" y2="1">
+                          <stop offset="0%" stopColor="#00d4ff" /><stop offset="100%" stopColor="#00cc88" />
+                        </linearGradient></defs>
+                      </svg>
+                      <span className="absolute inset-0 flex items-center justify-center text-[13px] text-white font-bold">{profileCompletion}%</span>
+                    </div>
+                  </div>
+                </div>
 
-            {/* Documents Card */}
-            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Documents</span>
-              </div>
-              <div className="text-center mb-2">
-                <span className="text-2xl font-bold text-[#00d4ff]">{docCount}</span>
-                <p className="text-[9px] text-white/20 mt-0.5">Total uploaded</p>
-              </div>
-              <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc" />
-              <button onClick={() => fileRef.current?.click()} disabled={uploading}
-                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.02] border border-dashed border-white/[0.06] text-white/30 hover:text-[#00d4ff] hover:border-[#00d4ff]/20 transition-all text-[10px] font-medium disabled:opacity-40">
-                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                </svg>
-                {uploading ? 'Uploading...' : 'Upload'}
-              </button>
-            </div>
+                {/* Documents Card */}
+                <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Documents</span>
+                  </div>
+                  <div className="text-center mb-2">
+                    <span className="text-2xl font-bold text-[#00d4ff]">{docCount}</span>
+                    <p className="text-[9px] text-white/20 mt-0.5">Total uploaded</p>
+                  </div>
+                  <input ref={fileRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc" />
+                  <button onClick={() => fileRef.current?.click()} disabled={uploading}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.02] border border-dashed border-white/[0.06] text-white/30 hover:text-[#00d4ff] hover:border-[#00d4ff]/20 transition-all text-[10px] font-medium disabled:opacity-40">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    {uploading ? 'Uploading...' : 'Upload'}
+                  </button>
+                </div>
 
-            {/* Application Name Card */}
-            <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
-              <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest block mb-2">Application</span>
-              <p className="text-white/80 text-[13px] font-medium leading-snug">{currentAppName}</p>
-              <div className="flex items-center gap-1.5 mt-2">
-                <div className={`w-1.5 h-1.5 rounded-full ${conversationId ? 'bg-[#00cc88]' : 'bg-white/10'}`} />
-                <span className="text-white/20 text-[10px]">{conversationId ? 'Active' : 'Not started'}</span>
-              </div>
-            </div>
+                {/* Application Name Card */}
+                <div className="flex-1 bg-white/[0.02] border border-white/[0.04] rounded-2xl p-3.5">
+                  <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest block mb-2">Application</span>
+                  <p className="text-white/80 text-[13px] font-medium leading-snug">{currentAppName}</p>
+                  <div className="flex items-center gap-1.5 mt-2">
+                    <div className={`w-1.5 h-1.5 rounded-full ${conversationId ? 'bg-[#00cc88]' : 'bg-white/10'}`} />
+                    <span className="text-white/20 text-[10px]">{conversationId ? 'Active' : 'Not started'}</span>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
-          {/* Live Form Filling Area - takes remaining space */}
-          <div className="px-3 pb-3 flex-1">
-            <div className="bg-white/[0.02] border border-white/[0.04] rounded-2xl p-4 h-full flex flex-col">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-white/80 font-semibold text-[13px]">Live Form Filling</h3>
-                {formInfo && (
-                  <span className="text-[#00cc88] text-[10px] flex items-center gap-1.5">
-                    <div className="w-1.5 h-1.5 rounded-full bg-[#00cc88] animate-pulse" />Active
-                  </span>
-                )}
-              </div>
-
-              {formInfo ? (
-                <div className="flex-1 flex flex-col min-h-0">
-                  {/* Progress bar */}
-                  <div className="mb-3">
-                    <div className="flex justify-between text-[11px] mb-1.5">
-                      <span className="text-white/30">Fields Completed</span>
-                      <span className="text-[#00d4ff] font-bold">{formInfo.fields_filled || 0}/{formInfo.total_fields || 0}</span>
+          {/* ── Live Form Filling Area — full height landscape browser ── */}
+          <div className="flex-1 flex flex-col min-h-0 p-2">
+            {formInfo ? (
+              <div className="flex-1 flex flex-col min-h-0 bg-white/[0.02] border border-white/[0.04] rounded-2xl overflow-hidden">
+                {/* Header: title + progress + status */}
+                <div className="shrink-0 px-3 py-2 border-b border-white/[0.04]">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <h3 className="text-white/80 font-semibold text-[12px]">Live Form Filling</h3>
+                    <div className="flex items-center gap-2">
+                      {formInfo.real_portal && (
+                        <span className="text-[8px] text-yellow-400/70 bg-yellow-400/5 border border-yellow-400/10 rounded px-1.5 py-0.5">REAL PORTAL</span>
+                      )}
+                      <span className="text-[#00cc88] text-[10px] flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-[#00cc88] animate-pulse" />Active
+                      </span>
                     </div>
-                    <div className="w-full h-2 bg-white/[0.03] rounded-full overflow-hidden">
+                  </div>
+                  {/* Progress bar */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-1.5 bg-white/[0.03] rounded-full overflow-hidden">
                       <div className="h-full bg-gradient-to-r from-[#00d4ff] to-[#00cc88] rounded-full transition-all duration-500"
                         style={{ width: `${completionPercentage}%` }} />
                     </div>
+                    <span className="text-[#00d4ff] text-[10px] font-bold shrink-0">{formInfo.fields_filled || 0}/{formInfo.total_fields || 0}</span>
                   </div>
+                </div>
 
-                  {/* Live browser screenshot projection */}
-                  {formScreenshot && (
-                    <div className="mb-3 rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.01]">
-                      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04]">
-                        <div className="w-2 h-2 rounded-full bg-red-400/50" />
-                        <div className="w-2 h-2 rounded-full bg-yellow-400/50" />
-                        <div className="w-2 h-2 rounded-full bg-green-400/50" />
-                        <span className="text-[9px] text-white/20 ml-2 uppercase tracking-wider">Live Browser</span>
-                        <div className="ml-auto flex items-center gap-1">
-                          <div className="w-1 h-1 rounded-full bg-[#00cc88] animate-pulse" />
-                          <span className="text-[8px] text-[#00cc88]/70">LIVE</span>
+                {/* ───── LANDSCAPE BROWSER SCREENSHOT — fills remaining height ───── */}
+                <div className="flex-1 flex flex-col min-h-0">
+                  {formScreenshot ? (
+                    <div className="flex-1 flex flex-col min-h-0">
+                      {/* Browser chrome bar */}
+                      <div className="flex items-center gap-1.5 px-3 py-1 bg-[#1a1a2e] border-b border-white/[0.04] shrink-0">
+                        <div className="w-2 h-2 rounded-full bg-red-400/60" />
+                        <div className="w-2 h-2 rounded-full bg-yellow-400/60" />
+                        <div className="w-2 h-2 rounded-full bg-green-400/60" />
+                        <span className="text-[8px] text-white/20 ml-2 uppercase tracking-wider truncate flex-1">
+                          {formInfo.page_name || 'Government Portal'}
+                          {formInfo.current_page > 1 && ` — Page ${formInfo.current_page}`}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-[#00cc88] animate-pulse" />
+                          <span className="text-[8px] text-[#00cc88]/80 font-bold">LIVE</span>
                         </div>
                       </div>
-                      <img
-                        src={`data:image/png;base64,${formScreenshot}`}
-                        alt="Live form filling"
-                        className="w-full h-auto max-h-[200px] object-contain bg-white/5"
-                      />
+                      {/* Screenshot image — takes all available space */}
+                      <div className="flex-1 overflow-hidden bg-white/[0.02] relative min-h-0">
+                        <img
+                          src={`data:image/${formInfo.screenshot_format || 'jpeg'};base64,${formScreenshot}`}
+                          alt="Live browser — form filling in progress"
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center">
+                      <div className="animate-pulse flex flex-col items-center gap-2">
+                        <div className="w-8 h-8 border-2 border-[#00d4ff]/30 border-t-[#00d4ff] rounded-full animate-spin" />
+                        <span className="text-[10px] text-white/20">Loading browser...</span>
+                      </div>
                     </div>
                   )}
+                </div>
 
-                  {/* Section name */}
-                  {formInfo.page_name && (
-                    <div className="bg-white/[0.01] border border-white/[0.03] rounded-lg px-3 py-2 mb-2">
-                      <span className="text-[9px] text-white/20 uppercase tracking-widest">Current: </span>
-                      <span className="text-white/60 text-[11px] font-medium">{formInfo.page_name}</span>
+                {/* ───── Compact filled fields overlay ───── */}
+                {formInfo.filled_fields && Object.keys(formInfo.filled_fields).length > 0 && (
+                  <div className="shrink-0 max-h-[140px] overflow-y-auto border-t border-white/[0.04] bg-[#060609]/90 scrollbar-thin">
+                    <div className="px-2 py-1.5 space-y-1">
+                      {Object.entries(formInfo.filled_fields).map(([key, value]) => {
+                        const isNew = formInfo.newly_filled?.includes(key);
+                        return (
+                          <div key={key} className={`flex items-center justify-between rounded px-2 py-1 text-[10px] transition-all duration-300 ${
+                            isNew
+                              ? 'bg-[#00d4ff]/8 border border-[#00d4ff]/15'
+                              : 'bg-white/[0.01]'
+                          }`}>
+                            <span className="text-white/25 capitalize">{key.replace(/_/g, ' ')}</span>
+                            <span className={`font-medium max-w-[55%] truncate ${isNew ? 'text-[#00d4ff]' : 'text-white/50'}`}>{value}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                  )}
-
-                  {/* Filled fields list */}
-                  <div className="flex-1 overflow-y-auto scrollbar-thin space-y-1.5 min-h-0">
-                    {formInfo.filled_fields && Object.entries(formInfo.filled_fields).map(([key, value]) => {
-                      const isNew = formInfo.newly_filled?.includes(key);
-                      return (
-                        <div key={key} className={`flex items-center justify-between rounded-lg px-3 py-2 transition-all duration-300 ${
-                          isNew
-                            ? 'bg-[#00d4ff]/5 border border-[#00d4ff]/15'
-                            : 'bg-white/[0.01] border border-white/[0.03]'
-                        }`}>
-                          <span className="text-white/25 text-[11px] capitalize">{key.replace(/_/g, ' ')}</span>
-                          <span className={`text-[11px] font-medium max-w-[50%] truncate ${isNew ? 'text-[#00d4ff]' : 'text-white/60'}`}>{value}</span>
-                        </div>
-                      );
-                    })}
                   </div>
+                )}
+              </div>
+            ) : (
+              /* ── Empty state — no form in progress ── */
+              <div className="flex-1 flex flex-col items-center justify-center text-center px-6 bg-white/[0.02] border border-white/[0.04] rounded-2xl">
+                <div className="w-20 h-20 rounded-2xl bg-white/[0.02] border border-white/[0.04] flex items-center justify-center mb-5">
+                  <svg className="w-9 h-9 text-white/8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
                 </div>
-              ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
-                  <div className="w-16 h-16 rounded-2xl bg-white/[0.02] border border-white/[0.04] flex items-center justify-center mb-4">
-                    <svg className="w-7 h-7 text-white/8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                  </div>
-                  <p className="text-white/25 text-sm font-medium mb-1">No form in progress</p>
-                  <p className="text-white/10 text-[11px] leading-relaxed">When you start applying for a scheme, the AI agent will fill forms here in real-time as you speak</p>
-                </div>
-              )}
-            </div>
+                <p className="text-white/25 text-sm font-medium mb-1">Live Browser</p>
+                <p className="text-white/10 text-[11px] leading-relaxed max-w-[240px]">
+                  When you start applying for a scheme, the AI agent will open the portal here and fill forms in real-time as you speak
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

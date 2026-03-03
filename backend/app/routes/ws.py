@@ -735,9 +735,28 @@ async def _start_form_agent(websocket: WebSocket, state: dict):
         return
 
     async def on_form_update(update: dict):
-        """Callback: send form updates to the client via WebSocket."""
+        """Callback: send form updates to the client via WebSocket.
+        Also sends a spoken voice notification when OTP or CAPTCHA is needed."""
         try:
             await websocket.send_json(update)
+
+            # Voice notification for OTP / CAPTCHA
+            data = update.get("data", {})
+            status = data.get("status", "")
+            if status == "waiting_otp":
+                await websocket.send_json({
+                    "type": "transcript",
+                    "role": "assistant",
+                    "text": "An OTP has been sent to your registered mobile number. "
+                            "Please check your phone and enter the OTP when you receive it.",
+                })
+            elif status == "waiting_captcha":
+                await websocket.send_json({
+                    "type": "transcript",
+                    "role": "assistant",
+                    "text": "There is a CAPTCHA on the form that I cannot solve automatically. "
+                            "Please look at the screen and enter the CAPTCHA text.",
+                })
         except Exception:
             pass
 
