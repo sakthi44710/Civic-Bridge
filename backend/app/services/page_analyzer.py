@@ -177,7 +177,12 @@ class PageAnalyzer:
         prompt = PAGE_ANALYSIS_PROMPT.format(page_html=html)
 
         try:
-            raw = bedrock_service.chat_raw(prompt, max_tokens=2048, temperature=0.1)
+            import asyncio
+            loop = asyncio.get_event_loop()
+            raw = await loop.run_in_executor(
+                None,
+                lambda: bedrock_service.chat_raw(prompt, max_tokens=2048, temperature=0.1)
+            )
             result = _parse_json_response(raw)
             if result and "fields" in result:
                 logger.info(f"Page analysis: type={result.get('page_type')}, "
@@ -213,7 +218,12 @@ class PageAnalyzer:
         )
 
         try:
-            raw = bedrock_service.chat_raw(prompt, max_tokens=1024, temperature=0.1)
+            import asyncio
+            loop = asyncio.get_event_loop()
+            raw = await loop.run_in_executor(
+                None,
+                lambda: bedrock_service.chat_raw(prompt, max_tokens=1024, temperature=0.1)
+            )
             result = _parse_json_response(raw)
             if result and "mappings" in result:
                 logger.info(f"Field mapping: {len(result['mappings'])} mapped, "

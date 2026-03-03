@@ -740,23 +740,35 @@ async def _start_form_agent(websocket: WebSocket, state: dict):
         try:
             await websocket.send_json(update)
 
-            # Voice notification for OTP / CAPTCHA
+            # Voice notification for OTP / CAPTCHA — text + TTS audio
             data = update.get("data", {})
             status = data.get("status", "")
+            spoken_text = None
             if status == "waiting_otp":
-                await websocket.send_json({
-                    "type": "transcript",
-                    "role": "assistant",
-                    "text": "An OTP has been sent to your registered mobile number. "
-                            "Please check your phone and enter the OTP when you receive it.",
-                })
+                spoken_text = ("An OTP has been sent to your registered mobile number. "
+                               "Please check your phone and enter the OTP when you receive it.")
             elif status == "waiting_captcha":
+                spoken_text = ("There is a CAPTCHA on the form that I cannot solve automatically. "
+                               "Please look at the screen and enter the CAPTCHA text.")
+
+            if spoken_text:
+                # Send as transcript for display
                 await websocket.send_json({
-                    "type": "transcript",
-                    "role": "assistant",
-                    "text": "There is a CAPTCHA on the form that I cannot solve automatically. "
-                            "Please look at the screen and enter the CAPTCHA text.",
+                    "type": "transcript", "role": "assistant", "text": spoken_text,
                 })
+                # Also synthesize TTS so the user hears it
+                try:
+                    tts_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: polly_service.synthesize(spoken_text, state.get("language", "en")),
+                    )
+                    audio_b64 = tts_result.get("audio_base64", "")
+                    if audio_b64:
+                        await websocket.send_json({
+                            "type": "audio_chunk", "data": audio_b64, "format": "mp3",
+                        })
+                except Exception:
+                    pass
         except Exception:
             pass
 

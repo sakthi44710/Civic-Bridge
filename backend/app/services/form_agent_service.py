@@ -162,10 +162,6 @@ class FormFillingSession:
         # Load scheme automation config (may contain portal_url)
         self.form_config = self._load_scheme_config(self.scheme_id)
 
-        # Pre-fill from user profile (before browser launch so we can fill immediately)
-        if user_data:
-            self._prefill_from_profile(user_data)
-
         # Launch Playwright browser — tries real portal first, falls back to template
         await self._launch_browser()
 
@@ -184,6 +180,10 @@ class FormFillingSession:
         else:
             self.required_fields = self._get_generic_fields()
             self.total_fields = len(self.required_fields)
+
+        # Pre-fill from user profile AFTER required_fields is populated
+        if user_data:
+            self._prefill_from_profile(user_data)
 
         # Take initial screenshot
         initial_screenshot = await self._take_screenshot()
@@ -337,12 +337,16 @@ class FormFillingSession:
         collected_summary = json.dumps(self.collected_fields, indent=2, ensure_ascii=False)
 
         try:
-            extraction = bedrock_service.chat_raw(
-                FIELD_EXTRACTION_PROMPT.format(
-                    field_list=field_list,
-                    collected_data=collected_summary,
-                    user_text=user_text,
-                    assistant_text=assistant_text or "(not yet responded)",
+            loop = asyncio.get_event_loop()
+            extraction = await loop.run_in_executor(
+                None,
+                lambda: bedrock_service.chat_raw(
+                    FIELD_EXTRACTION_PROMPT.format(
+                        field_list=field_list,
+                        collected_data=collected_summary,
+                        user_text=user_text,
+                        assistant_text=assistant_text or "(not yet responded)",
+                    )
                 )
             )
 
@@ -544,8 +548,7 @@ class FormFillingSession:
 
                     await self._page.wait_for_timeout(2000)  # wait for redirect
 
-                screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
-                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                screenshot_b64 = await self._take_screenshot()
 
                 # Check again — maybe we triggered another page needing CAPTCHA
                 interaction = await self._detect_page_interactions()
@@ -586,8 +589,7 @@ class FormFillingSession:
                     await self._page.fill(selector, captcha_text.strip())
                     await self._page.wait_for_timeout(300)
 
-                screenshot_bytes = await self._page.screenshot(full_page=False, type="png")
-                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                screenshot_b64 = await self._take_screenshot()
 
                 # Check if OTP field appeared after CAPTCHA
                 interaction = await self._detect_page_interactions()
