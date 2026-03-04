@@ -181,20 +181,42 @@ class BedrockService:
             raise
 
     def _parse_json(self, text: str) -> Optional[Dict]:
-        """Try to parse JSON from model response (handles markdown wrapping)."""
+        """Try to parse JSON from model response (handles markdown wrapping
+        and common AI-generated malformations)."""
         clean = text.strip()
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        def _try_parse(s: str) -> Optional[Dict]:
+            """Try parsing JSON, auto-repairing common AI mistakes."""
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                pass
+            # Repair: trailing commas before } or ]
+            repaired = re.sub(r',\s*([}\]])', r'\1', s)
+            # Repair: missing value after colon  ("key": , → "key": null,)
+            repaired = re.sub(r':\s*,', ': null,', repaired)
+            repaired = re.sub(r':\s*}', ': null}', repaired)
+            # Repair: single quotes → double quotes
+            repaired = repaired.replace("'", '"')
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+            return None
+
         # Try parsing the whole thing as JSON first
-        try:
-            return json.loads(clean)
-        except json.JSONDecodeError:
-            pass
+        result = _try_parse(clean)
+        if result:
+            return result
+
         # Try to find a JSON block at the END of the response (model often
         # outputs formatted text first, then JSON)
         # Look for the last top-level { ... } block
         depth = 0
         json_start = -1
+        json_end = -1
         for i in range(len(clean) - 1, -1, -1):
             c = clean[i]
             if c == '}':
@@ -206,19 +228,19 @@ class BedrockService:
                 if depth == 0:
                     json_start = i
                     break
-        if json_start >= 0:
-            try:
-                return json.loads(clean[json_start:json_end])
-            except json.JSONDecodeError:
-                pass
+        if json_start >= 0 and json_end > json_start:
+            result = _try_parse(clean[json_start:json_end])
+            if result:
+                return result
         return None
 
     def _clean_message_text(self, text: str) -> str:
         """Strip trailing JSON blocks and leaked metadata artifacts from model output."""
         clean = text.strip()
-        # Find and remove trailing JSON object
+        # Find and remove trailing JSON object (even malformed)
         depth = 0
         json_start = -1
+        json_end = -1
         for i in range(len(clean) - 1, -1, -1):
             c = clean[i]
             if c == '}':
@@ -230,10 +252,9 @@ class BedrockService:
                 if depth == 0:
                     json_start = i
                     break
-        if json_start > 0:
-            # Only strip if there's substantial text before the JSON
+        if json_start > 0 and json_end > json_start:
             before = clean[:json_start].strip()
-            if len(before) > 20:
+            if len(before) > 10:
                 clean = before
         # Strip leaked metadata lines the model sometimes appends inside message
         clean = re.sub(r'\*{0,2}Suggested Actions:\*{0,2}\s*\[.*?\]', '', clean, flags=re.DOTALL)
@@ -241,8 +262,12 @@ class BedrockService:
         clean = re.sub(r'\*{0,2}Requires Info:\*{0,2}\s*\[.*?\]', '', clean, flags=re.DOTALL)
         clean = re.sub(r'\*{0,2}Intent:\*{0,2}\s*\S+', '', clean)
         clean = re.sub(r'\*{0,2}Detected Language:\*{0,2}\s*\S+', '', clean)
+        # Remove raw JSON key-value fragments that model leaks without braces
+        clean = re.sub(r'["\'](?:intent|detected_language|suggested_schemes|suggested_actions|requires_info)["\']\s*:\s*[^,}\]]*[,]?', '', clean, flags=re.IGNORECASE)
         # Remove any remaining raw JSON arrays/objects that slipped through
         clean = re.sub(r'\[\{"type".*?\}\]', '', clean, flags=re.DOTALL)
+        # Remove orphaned braces/brackets that remain after stripping
+        clean = re.sub(r'[{}\[\]]\s*$', '', clean)
         # Collapse multiple blank lines into one
         clean = re.sub(r'\n{3,}', '\n\n', clean)
         return clean.strip()

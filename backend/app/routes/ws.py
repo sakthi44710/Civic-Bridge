@@ -327,7 +327,12 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             form_context=form_context,
         )
 
-        ai_response = ai_result.get("message", str(ai_result)) if isinstance(ai_result, dict) else str(ai_result)
+        ai_response = ai_result.get("message", "") if isinstance(ai_result, dict) else str(ai_result)
+        if not ai_response or ai_response == str(ai_result):
+            # Fallback: use generic acknowledgement instead of raw dict dump
+            ai_response = "I'm processing your request. Let me help you with that."
+        # Strip any leaked JSON/metadata fragments from the AI response
+        ai_response = _strip_json_artifacts(ai_response)
 
         # Send AI transcript
         await websocket.send_json({
@@ -467,10 +472,10 @@ async def _process_audio_after_silence(websocket: WebSocket, state: dict,
                 document_context=state.get("document_context", ""),
                 form_context=form_context,
             )
-            ai_response = (
-                ai_result.get("message", str(ai_result))
-                if isinstance(ai_result, dict) else str(ai_result)
-            )
+            ai_response = ai_result.get("message", "") if isinstance(ai_result, dict) else str(ai_result)
+            if not ai_response:
+                ai_response = "I'm processing your request. Let me help you with that."
+            ai_response = _strip_json_artifacts(ai_response)
         except Exception as e:
             logger.error(f"AI error in audio fallback: {e}")
             ai_response = "Sorry, I couldn't process that. Please try again."
@@ -688,16 +693,66 @@ def _build_form_context(state: dict) -> str:
     return " ".join(parts)
 
 
+def _strip_json_artifacts(text: str) -> str:
+    """Remove leaked JSON metadata from AI response text before sending to frontend."""
+    clean = text.strip()
+    # Remove trailing JSON object { ... }
+    depth = 0
+    json_start = -1
+    json_end = -1
+    for i in range(len(clean) - 1, -1, -1):
+        c = clean[i]
+        if c == '}':
+            if depth == 0:
+                json_end = i + 1
+            depth += 1
+        elif c == '{':
+            depth -= 1
+            if depth == 0:
+                json_start = i
+                break
+    if json_start > 0 and json_end > json_start:
+        before = clean[:json_start].strip()
+        if len(before) > 10:
+            clean = before
+    # Strip raw JSON key-value pairs that leak without braces
+    clean = re.sub(
+        r'["\']\s*(?:intent|detected_language|suggested_schemes|suggested_actions|requires_info)\s*["\']\s*:\s*[^,}\]]*[,]?\s*',
+        '', clean, flags=re.IGNORECASE
+    )
+    # Remove orphaned braces/brackets
+    clean = re.sub(r'[{}\[\]]\s*$', '', clean)
+    # Collapse blank lines
+    clean = re.sub(r'\n{3,}', '\n\n', clean)
+    return clean.strip()
+
+
 # Patterns that indicate the user wants to start filling a form
 _FORM_START_PATTERNS = re.compile(
-    r'(?:fill|start|begin|open|launch)\s*(?:the\s+)?(?:form|application)|'
+    r'(?:fill|filling|start|begin|open|launch)\s+(?:\w+\s+){0,4}(?:form|application|portal)|'
+    r'(?:form|application)\s+(?:\w+\s+){0,3}(?:fill|filling|start|begin|open)|'
     r'(?:apply|register)\s*(?:now|for|online)|'
-    r'(?:i\s+want\s+to\s+apply)|'
+    r'(?:i\s+want\s+to\s+(?:apply|fill))|'
     r'(?:help\s+me\s+(?:fill|apply))|'
-    r'(?:start\s+(?:my\s+)?application)|'
-    r'(?:form\s+(?:bhar|bharo|shuru))',  # Hindi transliterations
+    r'(?:start\s+(?:my\s+)?(?:application|filling))|'
+    r'(?:form\s+(?:bhar|bharo|shuru|bharein|bharna))|'  # Hindi
+    r'(?:(?:bhar|bharo|shuru)\s+(?:karo|kijiye|kare))|'  # Hindi verb forms
+    r'(?:form\s+nirappu|nirappu|nirapungal)|'  # Tamil
+    r'(?:apply\s+(?:cheyyi|cheyyandi))|'  # Telugu
+    r'(?:form\s+(?:puran|purun|pora|bharun))',  # Bengali/Marathi
     re.IGNORECASE,
 )
+
+# Keyword sets for broad form-start detection
+_FORM_ACTION_WORDS = frozenset({
+    'fill', 'filling', 'start', 'begin', 'open', 'launch', 'apply',
+    'submit', 'complete', 'register', 'commence', 'initiate',
+    'bhar', 'bharo', 'shuru', 'nirappu', 'puran', 'pora',
+})
+_FORM_TARGET_WORDS = frozenset({
+    'form', 'application', 'portal', 'registration', 'enrollment',
+    'apply', 'register', 'scholarship', 'scheme',
+})
 
 
 def _should_start_form(user_text: str, ai_result, state: dict) -> tuple:
@@ -741,6 +796,17 @@ def _should_start_form(user_text: str, ai_result, state: dict) -> tuple:
     # 3. User explicitly asked to fill a form (regex match)
     if _FORM_START_PATTERNS.search(user_text):
         return True, _resolve_scheme()
+
+    # 4. Broad keyword intersection — catches natural phrasing in any order
+    words = set(user_text.lower().split())
+    if words & _FORM_ACTION_WORDS and words & _FORM_TARGET_WORDS:
+        return True, _resolve_scheme()
+
+    # 5. Try to salvage intent from raw AI text (model sometimes leaks JSON metadata)
+    if isinstance(ai_result, dict):
+        raw_msg = str(ai_result.get("message", ""))
+        if '"application_start"' in raw_msg or '"application_help"' in raw_msg:
+            return True, _resolve_scheme()
 
     return False, ""
 
