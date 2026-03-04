@@ -385,17 +385,34 @@ export default function useNovaSonicCall({
     onVolumeChange?.(0);
   }, []);
 
-  // ─── Send text message via WebSocket ───────────────
-  const sendTextMessage = useCallback((text) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.warn('WebSocket not connected');
-      return;
+  // ─── Ensure WebSocket is connected (for text-only chat) ───
+  const ensureConnected = useCallback(async () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      return wsRef.current;
     }
-    wsRef.current.send(JSON.stringify({
-      type: 'text_message',
-      data: text,
+    const ws = await connectWebSocket();
+    // Send session_start for text-only session (no microphone needed)
+    ws.send(JSON.stringify({
+      type: 'session_start',
+      language: languageRef.current || 'en',
+      conversation_id: conversationIdRef.current || undefined,
+      scheme_id: schemeIdRef.current || undefined,
     }));
-  }, []);
+    return ws;
+  }, [connectWebSocket]);
+
+  // ─── Send text message via WebSocket (auto-connects if needed) ───
+  const sendTextMessage = useCallback(async (text) => {
+    try {
+      await ensureConnected();
+      wsRef.current.send(JSON.stringify({
+        type: 'text_message',
+        data: text,
+      }));
+    } catch (e) {
+      console.error('Failed to send text message via WebSocket:', e);
+    }
+  }, [ensureConnected]);
 
   // ─── Send any raw JSON message via WebSocket ───────
   const sendRawMessage = useCallback((msgObj) => {
@@ -534,6 +551,11 @@ export default function useNovaSonicCall({
     return () => {
       if (inCallRef.current) {
         endCall();
+      } else if (wsRef.current) {
+        // Close text-only WS session
+        try { wsRef.current.send(JSON.stringify({ type: 'session_end' })); } catch { /* ignore */ }
+        try { wsRef.current.close(); } catch { /* ignore */ }
+        wsRef.current = null;
       }
     };
   }, []);
@@ -543,9 +565,11 @@ export default function useNovaSonicCall({
     endCall,
     sendTextMessage,
     sendRawMessage,
+    ensureConnected,
     startFormSession,
     submitOtp,
     submitCaptcha,
     skipResponse,
+    isConnected: () => wsRef.current?.readyState === WebSocket.OPEN,
   };
 }

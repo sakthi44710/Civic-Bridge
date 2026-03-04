@@ -705,25 +705,42 @@ def _should_start_form(user_text: str, ai_result, state: dict) -> tuple:
     Returns (should_start: bool, scheme_id: str)."""
     scheme_id = state.get("scheme_id")
 
-    # 1. AI returned a matching intent + scheme
+    # Collect scheme from AI result
+    ai_schemes = []
+    ai_intent = ""
     if isinstance(ai_result, dict):
-        intent = ai_result.get("intent", "")
-        schemes = ai_result.get("suggested_schemes", [])
-        if schemes and intent in ("application_start", "scheme_inquiry",
-                                  "eligibility_check", "application_help"):
-            return True, schemes[0]
+        ai_intent = ai_result.get("intent", "")
+        ai_schemes = ai_result.get("suggested_schemes", [])
 
-    # 2. User explicitly asked to fill a form
-    if _FORM_START_PATTERNS.search(user_text):
-        # Use first suggested scheme, or the scheme from state, or generic
-        if isinstance(ai_result, dict):
-            schemes = ai_result.get("suggested_schemes", [])
-            if schemes:
-                return True, schemes[0]
+    # Helper: resolve the best scheme_id from all sources
+    def _resolve_scheme():
+        if ai_schemes:
+            return ai_schemes[0]
         if scheme_id:
-            return True, scheme_id
-        # Start with generic form template
-        return True, "generic_application"
+            return scheme_id
+        # Try to extract scheme from conversation history
+        history = state.get("conversation_history", [])
+        for msg in reversed(history[-10:]):
+            content = msg.get("content", "").lower()
+            # Look for common scheme references in recent messages
+            for pattern in ["nsp", "scholarship", "pm-kisan", "ayushman", "pmjay",
+                            "nrega", "mgnrega", "vidyalakshmi", "pm-jay",
+                            "pension", "obc", "sc/st", "education"]:
+                if pattern in content:
+                    return pattern.replace("/", "_") + "_scheme"
+        return "generic_application"
+
+    # 1. AI returned application_start intent (with or without schemes)
+    if ai_intent in ("application_start", "application_help"):
+        return True, _resolve_scheme()
+
+    # 2. AI returned a matching scheme inquiry intent WITH specific schemes
+    if ai_schemes and ai_intent in ("scheme_inquiry", "eligibility_check"):
+        return True, ai_schemes[0]
+
+    # 3. User explicitly asked to fill a form (regex match)
+    if _FORM_START_PATTERNS.search(user_text):
+        return True, _resolve_scheme()
 
     return False, ""
 

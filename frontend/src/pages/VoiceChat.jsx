@@ -228,34 +228,35 @@ export default function VoiceChat() {
     setMessages(p => [...p, { role: 'user', content: msg, timestamp: new Date().toISOString() }]);
     if (!currentAppName || currentAppName === 'New Session') setCurrentAppName(msg.substring(0, 30));
 
-    // If WebSocket is active (in call), send via WS for real-time form agent processing
-    if (inCall) {
-      voiceCall.sendTextMessage(msg);
-      return;
-    }
-
-    // Otherwise use REST API — show thinking indicator
-    setIsThinking(true);
+    // Always send via WebSocket — this enables form filling for both text and voice chat
+    // The hook auto-connects the WebSocket if not already connected
     try {
-      const resp = await chatAPI.sendMessage(msg, conversationId, language);
-      const data = resp.data;
-      setConversationId(data.conversation_id);
-      if (data.message) {
+      await voiceCall.sendTextMessage(msg);
+    } catch (e) {
+      console.error('WebSocket text send failed, falling back to REST:', e);
+      // Fallback to REST API if WebSocket fails
+      setIsThinking(true);
+      try {
+        const resp = await chatAPI.sendMessage(msg, conversationId, language);
+        const data = resp.data;
+        setConversationId(data.conversation_id);
+        if (data.message) {
+          setMessages(p => {
+            const newMsgs = [...p, { role: 'assistant', content: data.message, timestamp: new Date().toISOString() }];
+            setStreamingIdx(newMsgs.length - 1);
+            return newMsgs;
+          });
+        }
+        if (data.form_update) handleFormUpdate(data.form_update);
+      } catch {
         setMessages(p => {
-          const newMsgs = [...p, { role: 'assistant', content: data.message, timestamp: new Date().toISOString() }];
+          const newMsgs = [...p, { role: 'assistant', content: 'Something went wrong. Please try again.', timestamp: new Date().toISOString() }];
           setStreamingIdx(newMsgs.length - 1);
           return newMsgs;
         });
       }
-      if (data.form_update) handleFormUpdate(data.form_update);
-    } catch {
-      setMessages(p => {
-        const newMsgs = [...p, { role: 'assistant', content: 'Something went wrong. Please try again.', timestamp: new Date().toISOString() }];
-        setStreamingIdx(newMsgs.length - 1);
-        return newMsgs;
-      });
+      setIsThinking(false);
     }
-    setIsThinking(false);
   };
 
   const handleKeyDown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); } };
