@@ -111,7 +111,11 @@ export default function VoiceChat() {
     conversationId, language,
     schemeId: formInfo?.scheme_id || null,
     onConversationId: setConversationId,
-    onUserMessage: (text) => setMessages(p => [...p, { role: 'user', content: text, timestamp: new Date().toISOString() }]),
+    onUserMessage: (text) => setMessages(p => {
+      // Deduplicate: text chat adds the user message locally before the WS echo arrives
+      if (p.length > 0 && p[p.length - 1].role === 'user' && p[p.length - 1].content === text) return p;
+      return [...p, { role: 'user', content: text, timestamp: new Date().toISOString() }];
+    }),
     onAIMessage: (text) => setMessages(p => {
       const newMsgs = [...p, { role: 'assistant', content: text, timestamp: new Date().toISOString() }];
       setStreamingIdx(newMsgs.length - 1);
