@@ -2,13 +2,7 @@
 CivicBridge - AI-Powered Government Scheme Discovery Platform
 FastAPI Application Entry Point
 """
-import asyncio
 import logging
-import sys
-
-# ── Windows: ensure ProactorEventLoop is used so Playwright subprocess works ──
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse

@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -36,9 +37,13 @@ logger = logging.getLogger(__name__)
 # Path to local form template (used when no external URL is configured)
 _FORM_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "static" / "form_template.html"
 
-# Try to import Playwright
+# Single-threaded executor for Playwright — sync API runs here so we bypass
+# the asyncio event loop's lack of subprocess support on Windows.
+_pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pw")
+
+# Try to import Playwright (sync API — works on any event loop)
 try:
-    from playwright.async_api import async_playwright, Browser, Page
+    from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -210,14 +215,16 @@ class FormFillingSession:
         return initial_update
 
     async def _take_screenshot(self) -> str:
-        """Take a JPEG screenshot of the current page. Returns base64 string."""
+        """Take a JPEG screenshot of the current page. Returns base64 string.
+        Dispatches sync Playwright call to the dedicated thread."""
         if not self._page or not PLAYWRIGHT_AVAILABLE:
             return ""
         try:
-            shot = await self._page.screenshot(
-                full_page=False, type="jpeg", quality=80
-            )
-            return base64.b64encode(shot).decode("utf-8")
+            def _sync():
+                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                return base64.b64encode(shot).decode("utf-8")
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(_pw_executor, _sync)
         except Exception:
             return ""
 
@@ -256,35 +263,41 @@ class FormFillingSession:
         Called on real portals where we don't know the selectors in advance."""
         if not self._page:
             return
-        try:
-            analysis = await page_analyzer.analyze_page(self._page)
-            if analysis.get("fields"):
-                self._page_fields_cache = analysis["fields"]
-                # Merge discovered fields into required_fields
-                for field in analysis["fields"]:
-                    field_name = field.get("field_name", "")
-                    if field_name and not any(
-                        f.get("field_name") == field_name for f in self.required_fields
-                    ):
-                        self.required_fields.append({
-                            "field_name": field_name,
-                            "label": field.get("label", field_name),
-                            "type": field.get("type", "text"),
-                            "selector": field.get("selector", ""),
-                            "description": field.get("label", ""),
-                        })
-                self.total_fields = len(self.required_fields)
-                logger.info(f"Discovered {len(analysis['fields'])} fields on real portal")
 
-                # Check for OTP/CAPTCHA on the landing page
-                if analysis.get("has_otp"):
-                    self.waiting_for = "otp"
-                if analysis.get("has_captcha"):
-                    self.waiting_for = "captcha"
-                if analysis.get("login_required"):
-                    logger.info("Portal requires login — will attempt registration flow")
+        def _sync_discover():
+            try:
+                analysis = page_analyzer.analyze_page(self._page)
+                if analysis.get("fields"):
+                    self._page_fields_cache = analysis["fields"]
+                    for field in analysis["fields"]:
+                        field_name = field.get("field_name", "")
+                        if field_name and not any(
+                            f.get("field_name") == field_name for f in self.required_fields
+                        ):
+                            self.required_fields.append({
+                                "field_name": field_name,
+                                "label": field.get("label", field_name),
+                                "type": field.get("type", "text"),
+                                "selector": field.get("selector", ""),
+                                "description": field.get("label", ""),
+                            })
+                    self.total_fields = len(self.required_fields)
+                    logger.info(f"Discovered {len(analysis['fields'])} fields on real portal")
+
+                    if analysis.get("has_otp"):
+                        self.waiting_for = "otp"
+                    if analysis.get("has_captcha"):
+                        self.waiting_for = "captcha"
+                    if analysis.get("login_required"):
+                        logger.info("Portal requires login — will attempt registration flow")
+            except Exception as e:
+                logger.warning(f"Page field discovery failed: {e}")
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, _sync_discover)
         except Exception as e:
-            logger.warning(f"Page field discovery failed: {e}")
+            logger.warning(f"Discover fields executor error: {e}")
 
     async def on_conversation_text(self, role: str, text: str):
         """
@@ -429,89 +442,120 @@ class FormFillingSession:
 
     async def _fill_real_portal(self, new_fields: List[str]) -> str:
         """Fill fields on a real government portal using AI-discovered selectors.
-        Uses page_analyzer to map collected data to actual page selectors."""
+        Uses page_analyzer to map collected data to actual page selectors.
+        Runs on Playwright executor thread."""
         if not self._page or not PLAYWRIGHT_AVAILABLE:
             return ""
 
-        try:
-            # Re-discover page fields if cache is empty (page may have changed)
-            if not self._page_fields_cache:
-                await self._discover_page_fields()
+        def _sync_fill_real():
+            try:
+                # Re-discover page fields if cache is empty (page may have changed)
+                if not self._page_fields_cache:
+                    try:
+                        analysis = page_analyzer.analyze_page(self._page)
+                        if analysis.get("fields"):
+                            self._page_fields_cache = analysis["fields"]
+                            for field in analysis["fields"]:
+                                field_name = field.get("field_name", "")
+                                if field_name and not any(
+                                    f.get("field_name") == field_name for f in self.required_fields
+                                ):
+                                    self.required_fields.append({
+                                        "field_name": field_name,
+                                        "label": field.get("label", field_name),
+                                        "type": field.get("type", "text"),
+                                        "selector": field.get("selector", ""),
+                                        "description": field.get("label", ""),
+                                    })
+                            self.total_fields = len(self.required_fields)
+                    except Exception:
+                        pass
 
-            # Map collected data to page selectors via AI
-            mapping = await page_analyzer.map_data_to_fields(
-                self.collected_fields, self._page_fields_cache
-            )
+                # Map collected data to page selectors via AI
+                mapping = page_analyzer.map_data_to_fields(
+                    self.collected_fields, self._page_fields_cache
+                )
 
-            filled_count = 0
-            for m in mapping.get("mappings", []):
-                selector = m.get("selector", "")
-                value = m.get("value", "")
-                field_type = m.get("type", "text")
-                if not selector or not value:
-                    continue
+                filled_count = 0
+                for m in mapping.get("mappings", []):
+                    selector = m.get("selector", "")
+                    value = m.get("value", "")
+                    field_type = m.get("type", "text")
+                    if not selector or not value:
+                        continue
 
-                try:
-                    # Scroll into view
-                    await self._page.evaluate(
-                        "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
-                        selector,
-                    )
-                    await self._page.wait_for_timeout(200)
+                    try:
+                        # Scroll into view
+                        self._page.evaluate(
+                            "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
+                            selector,
+                        )
+                        self._page.wait_for_timeout(200)
 
-                    if field_type == "select":
-                        try:
-                            await self._page.select_option(selector, value=value)
-                        except Exception:
+                        if field_type == "select":
                             try:
-                                await self._page.select_option(selector, label=value)
+                                self._page.select_option(selector, value=value)
                             except Exception:
-                                pass
-                    elif field_type == "radio":
-                        await self._page.click(f"{selector}[value='{value}']")
-                    elif field_type == "checkbox":
-                        if value.lower() in ("true", "yes", "1"):
-                            await self._page.check(selector)
-                    else:
-                        await self._page.fill(selector, value)
+                                try:
+                                    self._page.select_option(selector, label=value)
+                                except Exception:
+                                    pass
+                        elif field_type == "radio":
+                            self._page.click(f"{selector}[value='{value}']")
+                        elif field_type == "checkbox":
+                            if value.lower() in ("true", "yes", "1"):
+                                self._page.check(selector)
+                        else:
+                            self._page.fill(selector, value)
 
-                    await self._page.wait_for_timeout(300)
-                    filled_count += 1
-                except Exception as e:
-                    logger.debug(f"Could not fill {selector}: {e}")
+                        self._page.wait_for_timeout(300)
+                        filled_count += 1
+                    except Exception as e:
+                        logger.debug(f"Could not fill {selector}: {e}")
 
-            logger.info(f"Real portal: filled {filled_count} fields via AI mapping")
+                logger.info(f"Real portal: filled {filled_count} fields via AI mapping")
 
-            # Check if we should click Next/Submit after filling
-            if filled_count > 0:
-                await self._try_navigate_next()
+                # Check if we should click Next/Submit after filling
+                if filled_count > 0:
+                    self._sync_try_navigate_next()
 
-        except Exception as e:
-            logger.warning(f"Real portal fill error: {e}")
+            except Exception as e:
+                logger.warning(f"Real portal fill error: {e}")
 
-        return await self._take_screenshot()
+            # Take screenshot
+            try:
+                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                return base64.b64encode(shot).decode("utf-8")
+            except Exception:
+                return ""
 
-    async def _try_navigate_next(self):
-        """After filling fields, check if there's a Submit/Next button to click.
-        Only clicks if all visible required fields are filled."""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(_pw_executor, _sync_fill_real)
+        except Exception:
+            return ""
+
+    def _sync_try_navigate_next(self):
+        """Sync version of navigate-next — called from within executor thread."""
         if not self._page:
             return
         try:
-            btn_selector = await page_analyzer.find_next_button(self._page)
+            btn_selector = page_analyzer.find_next_button(self._page)
             if btn_selector:
-                # Don't auto-submit — only auto-navigate to next page
-                # Check button text to avoid premature final submission
                 try:
-                    btn_text = await self._page.text_content(btn_selector)
+                    btn_text = self._page.text_content(btn_selector)
                     btn_text_lower = (btn_text or "").strip().lower()
-                    # Auto-click "Next" / "Continue" but NOT final "Submit"
                     if btn_text_lower in ("next", "continue", "proceed", "आगे",
                                           "next step", "save & next", "save and next"):
-                        await self._page.click(btn_selector)
-                        await self._page.wait_for_timeout(3000)  # wait for page load
-                        # Re-discover fields on the new page
+                        self._page.click(btn_selector)
+                        self._page.wait_for_timeout(3000)
                         self._page_fields_cache = []
-                        await self._discover_page_fields()
+                        try:
+                            analysis = page_analyzer.analyze_page(self._page)
+                            if analysis.get("fields"):
+                                self._page_fields_cache = analysis["fields"]
+                        except Exception:
+                            pass
                         self.current_page += 1
                         logger.info(f"Navigated to page {self.current_page}")
                 except Exception:
@@ -519,41 +563,64 @@ class FormFillingSession:
         except Exception as e:
             logger.debug(f"Next button navigation: {e}")
 
+    async def _try_navigate_next(self):
+        """After filling fields, check if there's a Submit/Next button to click.
+        Only clicks if all visible required fields are filled."""
+        if not self._page:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, self._sync_try_navigate_next)
+        except Exception as e:
+            logger.debug(f"Navigate next executor error: {e}")
+
     async def submit_otp(self, otp: str) -> Dict:
         """Called when the user provides the OTP. Types it into the live browser page."""
         self.waiting_for = None
         screenshot_b64 = ""
 
         if self._page and PLAYWRIGHT_AVAILABLE:
+            def _sync_otp():
+                nonlocal screenshot_b64
+                try:
+                    selector = self._otp_selector
+                    if not selector:
+                        for sel in OTP_SELECTORS:
+                            elem = self._page.query_selector(sel)
+                            if elem and elem.is_visible():
+                                selector = sel
+                                break
+
+                    if selector:
+                        self._page.fill(selector, str(otp).strip())
+                        self._page.wait_for_timeout(300)
+
+                        for btn_sel in VERIFY_BTN_SELECTORS:
+                            try:
+                                self._page.click(btn_sel, timeout=1500)
+                                break
+                            except Exception:
+                                pass
+
+                        self._page.wait_for_timeout(2000)
+
+                    try:
+                        shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                        screenshot_b64 = base64.b64encode(shot).decode("utf-8")
+                    except Exception:
+                        pass
+
+                    # Check for CAPTCHA after OTP
+                    interaction = self._sync_detect_page_interactions()
+                    return interaction
+                except Exception as e:
+                    logger.warning(f"OTP submit error: {e}")
+                    return None
+
             try:
-                selector = self._otp_selector
-                # Find the first visible OTP field if we don't have a cached selector
-                if not selector:
-                    for sel in OTP_SELECTORS:
-                        elem = await self._page.query_selector(sel)
-                        if elem and await elem.is_visible():
-                            selector = sel
-                            break
-
-                if selector:
-                    await self._page.fill(selector, str(otp).strip())
-                    await self._page.wait_for_timeout(300)
-
-                    # Try clicking a Verify / Submit OTP button
-                    for btn_sel in VERIFY_BTN_SELECTORS:
-                        try:
-                            await self._page.click(btn_sel, timeout=1500)
-                            break
-                        except Exception:
-                            pass
-
-                    await self._page.wait_for_timeout(2000)  # wait for redirect
-
-                screenshot_b64 = await self._take_screenshot()
-
-                # Check again — maybe we triggered another page needing CAPTCHA
-                interaction = await self._detect_page_interactions()
-                if interaction["needs_captcha"]:
+                loop = asyncio.get_event_loop()
+                interaction = await loop.run_in_executor(_pw_executor, _sync_otp)
+                if interaction and interaction.get("needs_captcha"):
                     self.waiting_for = "captcha"
                     self._captcha_selector = interaction["captcha_selector"]
                     update = self._build_update("waiting_captcha", screenshot=screenshot_b64,
@@ -561,7 +628,7 @@ class FormFillingSession:
                 else:
                     update = self._build_update("otp_submitted", screenshot=screenshot_b64)
             except Exception as e:
-                logger.warning(f"OTP submit error: {e}")
+                logger.warning(f"OTP executor error: {e}")
                 update = self._build_update("otp_error", screenshot=screenshot_b64)
         else:
             update = self._build_update("otp_submitted", screenshot="")
@@ -577,31 +644,44 @@ class FormFillingSession:
         screenshot_b64 = ""
 
         if self._page and PLAYWRIGHT_AVAILABLE:
+            def _sync_captcha():
+                nonlocal screenshot_b64
+                try:
+                    selector = self._captcha_selector
+                    if not selector:
+                        for sel in CAPTCHA_SELECTORS:
+                            elem = self._page.query_selector(sel)
+                            if elem and elem.is_visible():
+                                selector = sel
+                                break
+
+                    if selector:
+                        self._page.fill(selector, captcha_text.strip())
+                        self._page.wait_for_timeout(300)
+
+                    try:
+                        shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                        screenshot_b64 = base64.b64encode(shot).decode("utf-8")
+                    except Exception:
+                        pass
+
+                    interaction = self._sync_detect_page_interactions()
+                    return interaction
+                except Exception as e:
+                    logger.warning(f"CAPTCHA submit error: {e}")
+                    return None
+
             try:
-                selector = self._captcha_selector
-                if not selector:
-                    for sel in CAPTCHA_SELECTORS:
-                        elem = await self._page.query_selector(sel)
-                        if elem and await elem.is_visible():
-                            selector = sel
-                            break
-
-                if selector:
-                    await self._page.fill(selector, captcha_text.strip())
-                    await self._page.wait_for_timeout(300)
-
-                screenshot_b64 = await self._take_screenshot()
-
-                # Check if OTP field appeared after CAPTCHA
-                interaction = await self._detect_page_interactions()
-                if interaction["needs_otp"]:
+                loop = asyncio.get_event_loop()
+                interaction = await loop.run_in_executor(_pw_executor, _sync_captcha)
+                if interaction and interaction.get("needs_otp"):
                     self.waiting_for = "otp"
                     self._otp_selector = interaction["otp_selector"]
                     update = self._build_update("waiting_otp", screenshot=screenshot_b64)
                 else:
                     update = self._build_update("captcha_submitted", screenshot=screenshot_b64)
             except Exception as e:
-                logger.warning(f"CAPTCHA submit error: {e}")
+                logger.warning(f"CAPTCHA executor error: {e}")
                 update = self._build_update("captcha_error", screenshot=screenshot_b64)
         else:
             update = self._build_update("captcha_submitted", screenshot="")
@@ -611,8 +691,9 @@ class FormFillingSession:
         self._save_progress()
         return update
 
-    async def _detect_page_interactions(self) -> Dict:
-        """Scan the current Playwright page for OTP / CAPTCHA fields."""
+    def _sync_detect_page_interactions(self) -> Dict:
+        """Sync version: Scan the current Playwright page for OTP / CAPTCHA fields.
+        Called from within the Playwright executor thread."""
         result = {
             "needs_otp": False, "otp_selector": None,
             "needs_captcha": False, "captcha_selector": None,
@@ -621,35 +702,32 @@ class FormFillingSession:
         if not self._page or not PLAYWRIGHT_AVAILABLE:
             return result
         try:
-            # Detect OTP fields
             for sel in OTP_SELECTORS:
                 try:
-                    elem = await self._page.query_selector(sel)
-                    if elem and await elem.is_visible():
+                    elem = self._page.query_selector(sel)
+                    if elem and elem.is_visible():
                         result["needs_otp"] = True
                         result["otp_selector"] = sel
                         break
                 except Exception:
                     pass
 
-            # Detect CAPTCHA fields
             for sel in CAPTCHA_SELECTORS:
                 try:
-                    elem = await self._page.query_selector(sel)
-                    if elem and await elem.is_visible():
+                    elem = self._page.query_selector(sel)
+                    if elem and elem.is_visible():
                         result["needs_captcha"] = True
                         result["captcha_selector"] = sel
                         break
                 except Exception:
                     pass
 
-            # If CAPTCHA detected, grab the CAPTCHA image for the user
             if result["needs_captcha"]:
                 for img_sel in CAPTCHA_IMG_SELECTORS:
                     try:
-                        img_elem = await self._page.query_selector(img_sel)
-                        if img_elem and await img_elem.is_visible():
-                            img_bytes = await img_elem.screenshot()
+                        img_elem = self._page.query_selector(img_sel)
+                        if img_elem and img_elem.is_visible():
+                            img_bytes = img_elem.screenshot()
                             result["captcha_image_base64"] = base64.b64encode(img_bytes).decode("utf-8")
                             break
                     except Exception:
@@ -658,72 +736,102 @@ class FormFillingSession:
             logger.warning(f"Page interaction detection error: {e}")
         return result
 
+    async def _detect_page_interactions(self) -> Dict:
+        """Async wrapper — dispatches sync detection to Playwright thread."""
+        if not self._page or not PLAYWRIGHT_AVAILABLE:
+            return {
+                "needs_otp": False, "otp_selector": None,
+                "needs_captcha": False, "captcha_selector": None,
+                "captcha_image_base64": "",
+            }
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(_pw_executor, self._sync_detect_page_interactions)
+        except Exception:
+            return {
+                "needs_otp": False, "otp_selector": None,
+                "needs_captcha": False, "captcha_selector": None,
+                "captcha_image_base64": "",
+            }
+
     async def _fill_fields_in_browser(self, field_names: List[str]) -> str:
         """Fill specific fields in the Playwright browser (local template mode)
-        and take a screenshot."""
+        and take a screenshot. Dispatches sync Playwright calls to executor."""
         if not self._page or not PLAYWRIGHT_AVAILABLE:
             return self._generate_simulation_screenshot(field_names)
 
-        try:
-            last_selector = None
-            for field_name in field_names:
-                value = self.collected_fields.get(field_name, "")
-                if not value:
-                    continue
+        def _sync_fill():
+            try:
+                last_selector = None
+                for field_name in field_names:
+                    value = self.collected_fields.get(field_name, "")
+                    if not value:
+                        continue
 
-                field_config = next(
-                    (f for f in self.required_fields
-                     if f.get("field_name") == field_name or f.get("name") == field_name),
-                    None
-                )
-
-                if field_config and field_config.get("selector"):
-                    selector = field_config["selector"]
-                    field_type = field_config.get("type", "text")
-                    last_selector = selector
-
-                    try:
-                        await self._page.evaluate(
-                            "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
-                            selector,
-                        )
-                        await self._page.wait_for_timeout(200)
-
-                        if field_type == "select":
-                            try:
-                                await self._page.select_option(selector, value=value)
-                            except Exception:
-                                try:
-                                    await self._page.select_option(selector, label=value)
-                                except Exception as e2:
-                                    logger.warning(f"Select option failed for {field_name}: {e2}")
-                        elif field_type == "radio":
-                            await self._page.click(f"{selector}[value='{value}']")
-                        elif field_type == "checkbox":
-                            if value.lower() in ("true", "yes", "1"):
-                                await self._page.check(selector)
-                        else:
-                            await self._page.fill(selector, value)
-
-                        await self._page.wait_for_timeout(300)
-                    except Exception as e:
-                        logger.warning(f"Could not fill {field_name}: {e}")
-
-            # Scroll to last filled field for context
-            if last_selector:
-                try:
-                    await self._page.evaluate(
-                        "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
-                        last_selector,
+                    field_config = next(
+                        (f for f in self.required_fields
+                         if f.get("field_name") == field_name or f.get("name") == field_name),
+                        None
                     )
-                    await self._page.wait_for_timeout(300)
-                except Exception:
-                    pass
 
-        except Exception as e:
-            logger.warning(f"Playwright fill error: {e}")
+                    if field_config and field_config.get("selector"):
+                        selector = field_config["selector"]
+                        field_type = field_config.get("type", "text")
+                        last_selector = selector
 
-        return await self._take_screenshot()
+                        try:
+                            self._page.evaluate(
+                                "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
+                                selector,
+                            )
+                            self._page.wait_for_timeout(200)
+
+                            if field_type == "select":
+                                try:
+                                    self._page.select_option(selector, value=value)
+                                except Exception:
+                                    try:
+                                        self._page.select_option(selector, label=value)
+                                    except Exception as e2:
+                                        logger.warning(f"Select option failed for {field_name}: {e2}")
+                            elif field_type == "radio":
+                                self._page.click(f"{selector}[value='{value}']")
+                            elif field_type == "checkbox":
+                                if value.lower() in ("true", "yes", "1"):
+                                    self._page.check(selector)
+                            else:
+                                self._page.fill(selector, value)
+
+                            self._page.wait_for_timeout(300)
+                        except Exception as e:
+                            logger.warning(f"Could not fill {field_name}: {e}")
+
+                # Scroll to last filled field for context
+                if last_selector:
+                    try:
+                        self._page.evaluate(
+                            "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
+                            last_selector,
+                        )
+                        self._page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                logger.warning(f"Playwright fill error: {e}")
+
+            # Take screenshot
+            try:
+                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                return base64.b64encode(shot).decode("utf-8")
+            except Exception:
+                return ""
+
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(_pw_executor, _sync_fill)
+        except Exception:
+            return ""
 
     def _resolve_portal_url(self) -> Optional[str]:
         """Resolve the portal URL for the current scheme.
@@ -772,81 +880,91 @@ class FormFillingSession:
 
     async def _launch_browser(self):
         """Launch headless Chromium for form filling.
+        Uses Playwright SYNC API on a dedicated thread so we don't need
+        ProactorEventLoop (avoids Windows subprocess issue).
         Strategy: try navigating to the real portal first.
         If that fails (timeout, blocked, error), fall back to the local template."""
         if not PLAYWRIGHT_AVAILABLE:
             logger.info("[SIMULATION] Form agent running in simulation mode")
             return
 
+        def _sync_launch():
+            try:
+                self._pw = sync_playwright().start()
+                self._browser = self._pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ]
+                )
+
+                # Landscape viewport for better readability in the left panel
+                context = self._browser.new_context(
+                    viewport={"width": 1366, "height": 768},
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/125.0.0.0 Safari/537.36"
+                    ),
+                )
+
+                self._page = context.new_page()
+
+                # ── Try real portal first ────────────────────────────
+                portal_url = self._resolve_portal_url()
+                if portal_url:
+                    try:
+                        logger.info(f"Attempting real portal: {portal_url}")
+                        resp = self._page.goto(
+                            portal_url, wait_until="domcontentloaded", timeout=20000
+                        )
+                        self._page.wait_for_timeout(2000)
+
+                        # Check if we actually got a usable page
+                        if resp and resp.ok:
+                            self._on_real_portal = True
+                            logger.info(f"✓ Real portal loaded: {portal_url}")
+                            return
+                        else:
+                            logger.warning(f"Portal returned status {resp.status if resp else 'None'}, falling back")
+                    except Exception as e:
+                        logger.warning(f"Real portal failed ({portal_url}): {e}")
+
+                # ── Fallback: local template ─────────────────────────
+                self._on_real_portal = False
+                template_path = _FORM_TEMPLATE_PATH
+                if template_path.exists():
+                    file_url = template_path.as_uri()
+                    self._page.goto(file_url, wait_until="load", timeout=10000)
+                    try:
+                        scheme_name = self.scheme_id.replace("_", " ").replace("-", " ").title()
+                        self._page.evaluate(
+                            """(name) => {
+                                document.getElementById('scheme-title').textContent = name + ' Application';
+                                document.getElementById('breadcrumb-scheme').textContent = name;
+                            }""",
+                            scheme_name,
+                        )
+                    except Exception:
+                        pass
+                    logger.info("Loaded built-in form template (fallback)")
+                else:
+                    logger.warning(f"Form template not found at {template_path}")
+
+            except Exception as e:
+                logger.error(f"Failed to launch browser: {e}")
+                self._page = None
+
         try:
-            self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ]
-            )
-
-            # Landscape viewport for better readability in the left panel
-            context = await self._browser.new_context(
-                viewport={"width": 1366, "height": 768},
-                locale="en-IN",
-                timezone_id="Asia/Kolkata",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
-            )
-
-            self._page = await context.new_page()
-
-            # ── Try real portal first ────────────────────────────
-            portal_url = self._resolve_portal_url()
-            if portal_url:
-                try:
-                    logger.info(f"Attempting real portal: {portal_url}")
-                    resp = await self._page.goto(
-                        portal_url, wait_until="domcontentloaded", timeout=20000
-                    )
-                    await self._page.wait_for_timeout(2000)
-
-                    # Check if we actually got a usable page
-                    if resp and resp.ok:
-                        self._on_real_portal = True
-                        logger.info(f"✓ Real portal loaded: {portal_url}")
-                        return
-                    else:
-                        logger.warning(f"Portal returned status {resp.status if resp else 'None'}, falling back")
-                except Exception as e:
-                    logger.warning(f"Real portal failed ({portal_url}): {e}")
-
-            # ── Fallback: local template ─────────────────────────
-            self._on_real_portal = False
-            template_path = _FORM_TEMPLATE_PATH
-            if template_path.exists():
-                file_url = template_path.as_uri()
-                await self._page.goto(file_url, wait_until="load", timeout=10000)
-                try:
-                    scheme_name = self.scheme_id.replace("_", " ").replace("-", " ").title()
-                    await self._page.evaluate(
-                        """(name) => {
-                            document.getElementById('scheme-title').textContent = name + ' Application';
-                            document.getElementById('breadcrumb-scheme').textContent = name;
-                        }""",
-                        scheme_name,
-                    )
-                except Exception:
-                    pass
-                logger.info("Loaded built-in form template (fallback)")
-            else:
-                logger.warning(f"Form template not found at {template_path}")
-
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, _sync_launch)
         except Exception as e:
-            logger.error(f"Failed to launch browser: {e}")
+            logger.error(f"Playwright thread error: {e}")
             self._page = None
 
     async def close(self):
@@ -856,13 +974,21 @@ class FormFillingSession:
         for task in (self._extract_task, self._screenshot_task):
             if task and not task.done():
                 task.cancel()
+
+        def _sync_close():
+            try:
+                if self._page:
+                    self._page.close()
+                if self._browser:
+                    self._browser.close()
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
+
         try:
-            if self._page:
-                await self._page.close()
-            if self._browser:
-                await self._browser.close()
-            if self._pw:
-                await self._pw.stop()
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, _sync_close)
         except Exception:
             pass
 

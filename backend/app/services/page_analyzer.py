@@ -102,11 +102,12 @@ class PageAnalyzer:
     """Analyzes web pages using AI to discover form fields and navigation."""
 
     @staticmethod
-    async def extract_page_html(page) -> str:
+    def extract_page_html(page) -> str:
         """Extract relevant HTML from a Playwright page, stripped of noise.
-        Keeps form-related elements and visible text, removes scripts/styles."""
+        Keeps form-related elements and visible text, removes scripts/styles.
+        NOTE: This is sync — called from the Playwright executor thread."""
         try:
-            html = await page.evaluate("""() => {
+            html = page.evaluate("""() => {
                 // Remove script and style tags to reduce noise
                 const clone = document.body.cloneNode(true);
                 clone.querySelectorAll('script, style, noscript, svg, link, meta').forEach(el => el.remove());
@@ -157,8 +158,9 @@ class PageAnalyzer:
             return ""
 
     @staticmethod
-    async def analyze_page(page) -> Dict:
+    def analyze_page(page) -> Dict:
         """Analyze a Playwright page and return structured field data.
+        NOTE: This is sync — called from the Playwright executor thread.
         
         Returns:
             {
@@ -170,19 +172,14 @@ class PageAnalyzer:
                 ...
             }
         """
-        html = await PageAnalyzer.extract_page_html(page)
+        html = PageAnalyzer.extract_page_html(page)
         if not html:
             return {"page_type": "error", "fields": [], "buttons": []}
 
         prompt = PAGE_ANALYSIS_PROMPT.format(page_html=html)
 
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(
-                None,
-                lambda: bedrock_service.chat_raw(prompt, max_tokens=2048, temperature=0.1)
-            )
+            raw = bedrock_service.chat_raw(prompt, max_tokens=2048, temperature=0.1)
             result = _parse_json_response(raw)
             if result and "fields" in result:
                 logger.info(f"Page analysis: type={result.get('page_type')}, "
@@ -195,9 +192,10 @@ class PageAnalyzer:
         return {"page_type": "unknown", "fields": [], "buttons": []}
 
     @staticmethod
-    async def map_data_to_fields(collected_data: Dict[str, str],
-                                  page_fields: List[Dict]) -> Dict:
+    def map_data_to_fields(collected_data: Dict[str, str],
+                            page_fields: List[Dict]) -> Dict:
         """Map user's collected data to the current page's form fields.
+        NOTE: This is sync — called from the Playwright executor thread.
         
         Returns:
             {
@@ -218,12 +216,7 @@ class PageAnalyzer:
         )
 
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(
-                None,
-                lambda: bedrock_service.chat_raw(prompt, max_tokens=1024, temperature=0.1)
-            )
+            raw = bedrock_service.chat_raw(prompt, max_tokens=1024, temperature=0.1)
             result = _parse_json_response(raw)
             if result and "mappings" in result:
                 logger.info(f"Field mapping: {len(result['mappings'])} mapped, "
@@ -235,9 +228,10 @@ class PageAnalyzer:
         return {"mappings": [], "unmapped_fields": [], "unmapped_data": []}
 
     @staticmethod
-    async def find_next_button(page) -> Optional[str]:
+    def find_next_button(page) -> Optional[str]:
         """Find the 'Next' / 'Submit' / 'Continue' button on the current page.
-        Uses direct DOM queries first, then falls back to AI analysis."""
+        Uses direct DOM queries first, then falls back to AI analysis.
+        NOTE: This is sync — called from the Playwright executor thread."""
         # Quick DOM-based detection (no AI call needed)
         button_patterns = [
             'button:has-text("Next")', 'button:has-text("Continue")',
@@ -253,8 +247,8 @@ class PageAnalyzer:
         try:
             for selector in button_patterns:
                 try:
-                    elem = await page.query_selector(selector)
-                    if elem and await elem.is_visible():
+                    elem = page.query_selector(selector)
+                    if elem and elem.is_visible():
                         return selector
                 except Exception:
                     pass
