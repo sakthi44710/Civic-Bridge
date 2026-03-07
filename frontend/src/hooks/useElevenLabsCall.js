@@ -73,8 +73,8 @@ export default function useElevenLabsCall({
       // ElevenLabs sends message events with source and message text
       if (message.source === 'user') {
         onUserMessage?.(message.message);
-        // Forward user transcript to backend WS for form agent extraction
-        forwardToBackend('text_message', message.message);
+        // Forward user transcript as voice_transcript (lightweight — no backend AI)
+        forwardToBackend('voice_transcript', message.message);
       } else if (message.source === 'ai') {
         onAIMessage?.(message.message);
         // Forward AI response to backend so form agent gets context

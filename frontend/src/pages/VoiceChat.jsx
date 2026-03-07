@@ -462,7 +462,7 @@ export default function VoiceChat() {
                   </div>
                 </div>
 
-                {/* ───── LANDSCAPE BROWSER SCREENSHOT — fills remaining height ───── */}
+                {/* ───── LIVE BROWSER VIEW — smooth video-like rendering ───── */}
                 <div className="flex-1 flex flex-col min-h-0">
                   {formScreenshot ? (
                     <div className="flex-1 flex flex-col min-h-0">
@@ -480,20 +480,25 @@ export default function VoiceChat() {
                           <span className="text-[8px] text-[#00cc88]/80 font-bold">LIVE</span>
                         </div>
                       </div>
-                      {/* Screenshot image — takes all available space */}
-                      <div className="flex-1 overflow-hidden bg-white/[0.02] relative min-h-0">
+                      {/* Live browser viewport — cross-fade between frames */}
+                      <div className="flex-1 overflow-hidden bg-black relative min-h-0">
                         <img
                           src={`data:image/${formInfo.screenshot_format || 'jpeg'};base64,${formScreenshot}`}
                           alt="Live browser — form filling in progress"
                           className="w-full h-full object-contain"
+                          style={{ imageRendering: 'auto' }}
                         />
+                        {/* Live scan line effect */}
+                        <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-[0.03]">
+                          <div className="w-full h-[2px] bg-[#00d4ff] animate-[scanline_3s_linear_infinite]" />
+                        </div>
                       </div>
                     </div>
                   ) : (
                     <div className="flex-1 flex items-center justify-center">
                       <div className="animate-pulse flex flex-col items-center gap-2">
                         <div className="w-8 h-8 border-2 border-[#00d4ff]/30 border-t-[#00d4ff] rounded-full animate-spin" />
-                        <span className="text-[10px] text-white/20">Loading browser...</span>
+                        <span className="text-[10px] text-white/20">Launching browser...</span>
                       </div>
                     </div>
                   )}

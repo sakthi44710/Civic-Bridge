@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -151,6 +152,12 @@ class FormFillingSession:
         self._on_real_portal = False  # True when browsing a real govt website
         self._page_fields_cache: List[Dict] = []  # AI-discovered fields on current page
 
+        # CDP screencast state (live frame streaming)
+        self._cdp_session = None
+        self._latest_frame_b64: str = ""
+        self._frame_seq: int = 0  # monotonic frame counter
+        self._frame_lock = threading.Lock()
+
         # OTP / CAPTCHA gating
         self.waiting_for: Optional[str] = None   # None | 'otp' | 'captcha'
         self._otp_selector: Optional[str] = None
@@ -205,8 +212,10 @@ class FormFillingSession:
         if self.on_update:
             await self.on_update(initial_update)
 
-        # Start periodic screenshot refresh (every 3 s) for live projection
-        self._screenshot_task = asyncio.ensure_future(self._periodic_screenshot())
+        # Start CDP screencast for live browser streaming (~video-like)
+        await self._start_screencast()
+        # Also start a frame forwarder that polls for new CDP frames at ~200ms
+        self._screenshot_task = asyncio.ensure_future(self._live_frame_streamer())
 
         logger.info(f"Form session started: {self.session_id}, scheme={self.scheme_id}, "
                     f"real_portal={self._on_real_portal}, "
@@ -221,30 +230,130 @@ class FormFillingSession:
             return ""
         try:
             def _sync():
-                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
+                shot = self._page.screenshot(full_page=False, type="jpeg", quality=60)
                 return base64.b64encode(shot).decode("utf-8")
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(_pw_executor, _sync)
         except Exception:
             return ""
 
-    async def _periodic_screenshot(self, interval: float = 3.0):
-        """Send a fresh browser screenshot every `interval` seconds so the
-        frontend shows a truly live view, even between field fills."""
+    def _sync_take_screenshot_quick(self) -> str:
+        """Take screenshot synchronously (called from within PW executor thread).
+        Used for micro-screenshots during fill operations."""
+        if not self._page:
+            return ""
+        try:
+            shot = self._page.screenshot(full_page=False, type="jpeg", quality=50)
+            b64 = base64.b64encode(shot).decode("utf-8")
+            with self._frame_lock:
+                self._latest_frame_b64 = b64
+                self._frame_seq += 1
+            return b64
+        except Exception:
+            return ""
+
+    async def _start_screencast(self):
+        """Start CDP Page.screencastFrame for live browser streaming.
+        CDP sends frames only when the page actually re-renders, making it
+        far more efficient and responsive than periodic screenshots."""
+        if not self._page or not PLAYWRIGHT_AVAILABLE:
+            return
+
+        def _sync_start_sc():
+            try:
+                # Get a CDP session from the browser
+                self._cdp_session = self._page.context.browser.new_browser_cdp_session()
+
+                def _on_frame(params):
+                    """Called by CDP whenever the browser renders a new frame."""
+                    frame_data = params.get("data", "")
+                    session_id = params.get("sessionId", 0)
+                    if frame_data:
+                        with self._frame_lock:
+                            self._latest_frame_b64 = frame_data
+                            self._frame_seq += 1
+                    # Acknowledge so CDP sends the next frame
+                    try:
+                        self._cdp_session.send("Page.screencastFrameAck",
+                                               {"sessionId": session_id})
+                    except Exception:
+                        pass
+
+                self._cdp_session.on("Page.screencastFrame", _on_frame)
+                self._cdp_session.send("Page.startScreencast", {
+                    "format": "jpeg",
+                    "quality": 55,
+                    "maxWidth": 1366,
+                    "maxHeight": 768,
+                    "everyNthFrame": 1,
+                })
+                logger.info("CDP screencast started — live frame streaming enabled")
+            except Exception as e:
+                logger.info(f"CDP screencast not available, using screenshot fallback: {e}")
+                self._cdp_session = None
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, _sync_start_sc)
+        except Exception as e:
+            logger.info(f"Screencast start error: {e}")
+
+    async def _stop_screencast(self):
+        """Stop CDP screencast."""
+        if not self._cdp_session:
+            return
+        def _sync_stop():
+            try:
+                self._cdp_session.send("Page.stopScreencast")
+                self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(_pw_executor, _sync_stop)
+        except Exception:
+            pass
+
+    async def _live_frame_streamer(self):
+        """High-frequency frame forwarder: polls for new CDP screencast frames
+        (or takes screenshot fallback) and sends them over WebSocket.
+        Runs at ~5 FPS for a live video-like experience."""
+        last_seq = -1
+        fallback_counter = 0
         try:
             while self._running:
-                await asyncio.sleep(interval)
+                await asyncio.sleep(0.20)  # ~5 FPS
                 if not self._running or not self._page or not PLAYWRIGHT_AVAILABLE:
                     break
-                try:
-                    b64 = await self._take_screenshot()
-                    if b64 and self.on_update:
+
+                frame_b64 = None
+                with self._frame_lock:
+                    if self._frame_seq != last_seq and self._latest_frame_b64:
+                        frame_b64 = self._latest_frame_b64
+                        last_seq = self._frame_seq
+
+                # If CDP screencast is not producing frames (idle page), take a
+                # screenshot every ~2 seconds as fallback
+                if not frame_b64:
+                    fallback_counter += 1
+                    if fallback_counter >= 10:  # 10 * 200ms = 2s
+                        fallback_counter = 0
+                        try:
+                            frame_b64 = await self._take_screenshot()
+                        except Exception:
+                            pass
+                else:
+                    fallback_counter = 0
+
+                if frame_b64 and self.on_update:
+                    try:
                         await self.on_update({
                             "type": "form_update",
                             "data": {
                                 "session_id": self.session_id,
                                 "status": self.waiting_for or "filling",
-                                "screenshot_base64": b64,
+                                "screenshot_base64": frame_b64,
                                 "screenshot_format": "jpeg",
                                 "fields_filled": len(self.collected_fields),
                                 "total_fields": self.total_fields,
@@ -253,8 +362,8 @@ class FormFillingSession:
                                 "timestamp": now_iso(),
                             }
                         })
-                except Exception:
-                    pass  # page may have closed
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             pass
 
@@ -485,12 +594,25 @@ class FormFillingSession:
                         continue
 
                     try:
-                        # Scroll into view
+                        # Scroll into view + micro-frame
                         self._page.evaluate(
                             "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
                             selector,
                         )
                         self._page.wait_for_timeout(200)
+                        self._sync_take_screenshot_quick()  # frame: scrolled to field
+
+                        # Highlight field before filling (visual cue)
+                        try:
+                            self._page.evaluate(
+                                """(sel) => {
+                                    const el = document.querySelector(sel);
+                                    if (el) { el.style.outline = '3px solid #00d4ff'; el.style.outlineOffset = '2px'; }
+                                }""", selector)
+                            self._page.wait_for_timeout(150)
+                            self._sync_take_screenshot_quick()  # frame: field highlighted
+                        except Exception:
+                            pass
 
                         if field_type == "select":
                             try:
@@ -506,9 +628,25 @@ class FormFillingSession:
                             if value.lower() in ("true", "yes", "1"):
                                 self._page.check(selector)
                         else:
-                            self._page.fill(selector, value)
+                            # Type character-by-character for live typing effect
+                            self._page.click(selector)
+                            self._page.fill(selector, "")  # clear first
+                            for ch in value:
+                                self._page.type(selector, ch, delay=30)
+                            self._sync_take_screenshot_quick()  # frame: after typing
 
-                        self._page.wait_for_timeout(300)
+                        # Remove highlight
+                        try:
+                            self._page.evaluate(
+                                """(sel) => {
+                                    const el = document.querySelector(sel);
+                                    if (el) { el.style.outline = ''; el.style.outlineOffset = ''; }
+                                }""", selector)
+                        except Exception:
+                            pass
+
+                        self._page.wait_for_timeout(200)
+                        self._sync_take_screenshot_quick()  # frame: field filled
                         filled_count += 1
                     except Exception as e:
                         logger.debug(f"Could not fill {selector}: {e}")
@@ -522,12 +660,8 @@ class FormFillingSession:
             except Exception as e:
                 logger.warning(f"Real portal fill error: {e}")
 
-            # Take screenshot
-            try:
-                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
-                return base64.b64encode(shot).decode("utf-8")
-            except Exception:
-                return ""
+            # Final screenshot
+            return self._sync_take_screenshot_quick()
 
         try:
             loop = asyncio.get_event_loop()
@@ -780,11 +914,25 @@ class FormFillingSession:
                         last_selector = selector
 
                         try:
+                            # Scroll into view + capture frame
                             self._page.evaluate(
                                 "(sel) => document.querySelector(sel)?.scrollIntoView({behavior:'smooth',block:'center'})",
                                 selector,
                             )
                             self._page.wait_for_timeout(200)
+                            self._sync_take_screenshot_quick()  # frame: scrolled to field
+
+                            # Highlight field
+                            try:
+                                self._page.evaluate(
+                                    """(sel) => {
+                                        const el = document.querySelector(sel);
+                                        if (el) { el.style.outline = '3px solid #00d4ff'; el.style.outlineOffset = '2px'; }
+                                    }""", selector)
+                                self._page.wait_for_timeout(150)
+                                self._sync_take_screenshot_quick()  # frame: highlighted
+                            except Exception:
+                                pass
 
                             if field_type == "select":
                                 try:
@@ -800,9 +948,25 @@ class FormFillingSession:
                                 if value.lower() in ("true", "yes", "1"):
                                     self._page.check(selector)
                             else:
-                                self._page.fill(selector, value)
+                                # Type character-by-character for live effect
+                                self._page.click(selector)
+                                self._page.fill(selector, "")  # clear
+                                for ch in value:
+                                    self._page.type(selector, ch, delay=30)
+                                self._sync_take_screenshot_quick()  # frame: after typing
 
-                            self._page.wait_for_timeout(300)
+                            # Remove highlight
+                            try:
+                                self._page.evaluate(
+                                    """(sel) => {
+                                        const el = document.querySelector(sel);
+                                        if (el) { el.style.outline = ''; el.style.outlineOffset = ''; }
+                                    }""", selector)
+                            except Exception:
+                                pass
+
+                            self._page.wait_for_timeout(200)
+                            self._sync_take_screenshot_quick()  # frame: field filled
                         except Exception as e:
                             logger.warning(f"Could not fill {field_name}: {e}")
 
@@ -820,12 +984,8 @@ class FormFillingSession:
             except Exception as e:
                 logger.warning(f"Playwright fill error: {e}")
 
-            # Take screenshot
-            try:
-                shot = self._page.screenshot(full_page=False, type="jpeg", quality=80)
-                return base64.b64encode(shot).decode("utf-8")
-            except Exception:
-                return ""
+            # Final screenshot
+            return self._sync_take_screenshot_quick()
 
         try:
             loop = asyncio.get_event_loop()
@@ -974,6 +1134,9 @@ class FormFillingSession:
         for task in (self._extract_task, self._screenshot_task):
             if task and not task.done():
                 task.cancel()
+
+        # Stop CDP screencast
+        await self._stop_screencast()
 
         def _sync_close():
             try:

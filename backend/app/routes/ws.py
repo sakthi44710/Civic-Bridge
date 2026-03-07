@@ -128,13 +128,23 @@ async def voice_websocket(
             elif msg_type == "text_message":
                 await _handle_text_message(websocket, session_state, msg)
 
+            elif msg_type == "voice_transcript":
+                # User speech transcript from ElevenLabs — feed to form agent
+                # and detect form triggers, but DON'T run backend AI (ElevenLabs handles it)
+                await _handle_voice_transcript(websocket, session_state, msg)
+
             elif msg_type == "assistant_message":
                 # ElevenLabs agent response forwarded from frontend — feed to form agent
+                # Also check if the AI mentioned form filling (backup trigger)
                 assistant_text = str(msg.get("data", "")).strip()
                 if assistant_text:
                     form_session = session_state.get("form_session")
                     if form_session:
                         await form_session.on_conversation_text("assistant", assistant_text)
+                    # Save to history so form context builds correctly
+                    session_state.setdefault("conversation_history", []).append(
+                        {"role": "assistant", "content": assistant_text}
+                    )
 
             elif msg_type == "start_form":
                 # Client explicitly starts a form session (e.g. user picks a scheme)
@@ -408,6 +418,43 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
         await websocket.send_json({"type": "error", "message": str(e)})
 
     await websocket.send_json({"type": "status", "status": "listening"})
+
+
+async def _handle_voice_transcript(websocket: WebSocket, state: dict, msg: dict):
+    """Handle transcripts from ElevenLabs voice AI.
+    Unlike _handle_text_message, this does NOT run the backend AI pipeline.
+    It only:
+      1. Feeds the transcript to the form agent (for field extraction)
+      2. Checks for form-start triggers (regex/keyword detection)
+      3. Saves to conversation history
+    """
+    text = str(msg.get("data", "")).strip()
+    if not text:
+        return
+
+    # Feed to form agent (background)
+    form_session = state.get("form_session")
+    if form_session:
+        await form_session.on_conversation_text("user", text)
+
+    # Check for form trigger — start form agent if not already running
+    if not form_session:
+        should_start, scheme_id = _should_start_form(text, {}, state)
+        if should_start:
+            state["scheme_id"] = scheme_id
+            await _start_form_agent(websocket, state)
+            await websocket.send_json({
+                "type": "form_started",
+                "scheme_id": scheme_id,
+                "session_id": state["form_session"].session_id
+                    if state.get("form_session") else None,
+            })
+
+    # Save to history
+    state.setdefault("conversation_history", []).append(
+        {"role": "user", "content": text}
+    )
+    asyncio.ensure_future(_save_message(state, "user", text))
 
 
 async def _handle_session_end(websocket: WebSocket, state: dict):
