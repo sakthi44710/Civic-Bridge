@@ -128,6 +128,14 @@ async def voice_websocket(
             elif msg_type == "text_message":
                 await _handle_text_message(websocket, session_state, msg)
 
+            elif msg_type == "assistant_message":
+                # ElevenLabs agent response forwarded from frontend — feed to form agent
+                assistant_text = str(msg.get("data", "")).strip()
+                if assistant_text:
+                    form_session = session_state.get("form_session")
+                    if form_session:
+                        await form_session.on_conversation_text("assistant", assistant_text)
+
             elif msg_type == "start_form":
                 # Client explicitly starts a form session (e.g. user picks a scheme)
                 scheme_id = msg.get("scheme_id")

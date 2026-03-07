@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore, useLanguageStore, useVoiceStore } from '../store';
 import { chatAPI, documentsAPI, userAPI } from '../services/api';
-import useNovaSonicCall from '../hooks/useNovaSonicCall';
+import useElevenLabsCall from '../hooks/useElevenLabsCall';
 import Globe from '../components/Globe';
 import MarkdownMessage from '../components/MarkdownMessage';
 import StreamingMessage from '../components/StreamingMessage';
@@ -106,8 +106,8 @@ export default function VoiceChat() {
     setInteractionInput('');
   };
 
-  // Nova Sonic WebSocket-based voice hook (speech-to-speech)
-  const voiceCall = useNovaSonicCall({
+  // ElevenLabs Conversational AI voice hook (speech-to-speech via WebRTC)
+  const voiceCall = useElevenLabsCall({
     conversationId, language,
     schemeId: formInfo?.scheme_id || null,
     onConversationId: setConversationId,
@@ -688,7 +688,7 @@ export default function VoiceChat() {
       {/* ═══ FOOTER BAR ═══ */}
       <footer className="relative z-30 flex items-center justify-between px-6 h-[36px] border-t border-white/[0.04] bg-[#060609]/80">
         <div />
-        <p className="text-white/10 text-[10px] tracking-widest uppercase font-medium">Powered by AWS AI</p>
+        <p className="text-white/10 text-[10px] tracking-widest uppercase font-medium">Powered by ElevenLabs AI</p>
         <button onClick={handleLogout} title="Sign Out"
           className="w-7 h-7 rounded-lg bg-white/[0.02] border border-white/[0.04] flex items-center justify-center hover:bg-red-500/10 hover:border-red-500/15 transition-all group">
           <svg className="w-3.5 h-3.5 text-white/20 group-hover:text-red-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
