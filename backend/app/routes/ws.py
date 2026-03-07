@@ -33,6 +33,7 @@ from typing import Optional
 
 from app.services.nova_sonic_service import nova_sonic_service, NovaSonicSession
 from app.services.form_agent_service import form_agent_service, FormFillingSession
+from app.services.scheme_service import scheme_service
 from app.services.agent_orchestrator import orchestrator
 from app.services.transcribe_service import transcribe_service
 from app.services.polly_service import polly_service
@@ -175,6 +176,10 @@ async def voice_websocket(
                     await form_session.submit_captcha(captcha_text)
                 else:
                     await websocket.send_json({"type": "error", "message": "No active form session"})
+
+            elif msg_type == "tool_call":
+                # ElevenLabs client tool → backend action dispatch
+                await _handle_tool_call(websocket, session_state, msg)
 
             elif msg_type == "session_end":
                 await _handle_session_end(websocket, session_state)
@@ -418,6 +423,223 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
         await websocket.send_json({"type": "error", "message": str(e)})
 
     await websocket.send_json({"type": "status", "status": "listening"})
+
+
+# ═════════════════════════════════════════════════════════
+# Tool Call Handler  (ElevenLabs client tools → backend actions)
+# ═════════════════════════════════════════════════════════
+
+async def _handle_tool_call(websocket: WebSocket, state: dict, msg: dict):
+    """
+    Dispatch an ElevenLabs client tool call to the appropriate backend service.
+    
+    Protocol:
+        Frontend sends:  { type: "tool_call", call_id: "...", tool: "search_schemes", params: {...} }
+        Backend replies:  { type: "tool_result", call_id: "...", result: "readable string" }
+    
+    The result string is returned to the ElevenLabs agent so it can speak
+    the answer back to the user.
+    """
+    call_id = msg.get("call_id", "")
+    tool = msg.get("tool", "")
+    params = msg.get("params", {})
+
+    logger.info(f"Tool call: {tool} (call_id={call_id}) params={params}")
+
+    try:
+        result = await _dispatch_tool(tool, params, state, websocket)
+    except Exception as e:
+        logger.error(f"Tool call error ({tool}): {e}")
+        result = f"Sorry, there was an error processing that request: {str(e)}"
+
+    await websocket.send_json({
+        "type": "tool_result",
+        "call_id": call_id,
+        "result": result,
+    })
+
+
+async def _dispatch_tool(tool: str, params: dict, state: dict,
+                          websocket: WebSocket) -> str:
+    """Route a tool call to the correct service and return a speakable result."""
+    loop = asyncio.get_event_loop()
+
+    # ── search_schemes ──────────────────────────────────────
+    if tool == "search_schemes":
+        query = params.get("query", "")
+        category = params.get("category", "")
+        user_state = (state.get("user_profile") or {}).get("state", "")
+        schemes = await loop.run_in_executor(
+            None,
+            lambda: scheme_service.search_schemes(
+                query=query or None, category=category or None, state=user_state or None
+            ),
+        )
+        if not schemes:
+            return "I couldn't find any schemes matching your search. Try different keywords or a broader category."
+        # Limit to top 5 for spoken response
+        top = schemes[:5]
+        lines = [f"I found {len(schemes)} scheme{'s' if len(schemes) != 1 else ''}. Here are the top results:"]
+        for i, s in enumerate(top, 1):
+            name = s.get("name", "Unknown")
+            desc = (s.get("description") or "")[:120]
+            benefit = s.get("benefit_amount") or s.get("benefit_description") or ""
+            line = f"{i}. {name}"
+            if benefit:
+                line += f" — benefit: {benefit}"
+            if desc:
+                line += f". {desc}"
+            lines.append(line)
+        if len(schemes) > 5:
+            lines.append(f"...and {len(schemes) - 5} more. Would you like me to narrow the search?")
+        return "\n".join(lines)
+
+    # ── check_eligibility ───────────────────────────────────
+    elif tool == "check_eligibility":
+        scheme_id = params.get("scheme_id", "")
+        if not scheme_id:
+            return "Please specify which scheme you'd like me to check your eligibility for."
+        user_profile = state.get("user_profile") or {}
+        result = await loop.run_in_executor(
+            None,
+            lambda: scheme_service.check_eligibility(user_profile, scheme_id),
+        )
+        if result.get("error"):
+            return f"I couldn't find that scheme. {result['error']}"
+        status = result.get("status", "unknown")
+        score = result.get("match_score", 0)
+        met = result.get("met_criteria", [])
+        unmet = result.get("unmet_criteria", [])
+        missing = result.get("missing_info", [])
+        parts = [f"Eligibility check result: {status} (match score {score}%)."]
+        if met:
+            parts.append(f"Criteria met: {', '.join(met)}.")
+        if unmet:
+            parts.append(f"Criteria not met: {', '.join(unmet)}.")
+        if missing:
+            parts.append(f"Missing information: {', '.join(missing)}. Please update your profile.")
+        # Include AI analysis if available
+        ai = result.get("ai_analysis")
+        if isinstance(ai, dict) and ai.get("summary"):
+            parts.append(ai["summary"])
+        return " ".join(parts)
+
+    # ── start_form_filling ──────────────────────────────────
+    elif tool == "start_form_filling":
+        scheme_id = params.get("scheme_id", "")
+        if not scheme_id:
+            return "Please tell me which scheme form you'd like me to fill."
+        # Check if a form session is already running
+        if state.get("form_session"):
+            return "A form filling session is already in progress. You can ask me for the form status or wait for it to complete."
+        state["scheme_id"] = scheme_id
+        await _start_form_agent(websocket, state)
+        if state.get("form_session"):
+            return f"I've started filling the form for scheme {scheme_id}. You'll see the live browser on your screen. I'll let you know when I need any input from you."
+        else:
+            return f"I wasn't able to start the form for scheme {scheme_id}. The scheme portal might be unavailable."
+
+    # ── get_form_status ─────────────────────────────────────
+    elif tool == "get_form_status":
+        form_session = state.get("form_session")
+        if not form_session:
+            return "There's no active form filling session right now. Would you like me to start one?"
+        try:
+            filled = form_session.filled_fields if hasattr(form_session, 'filled_fields') else {}
+            missing = form_session.missing_fields if hasattr(form_session, 'missing_fields') else []
+            status = form_session.status if hasattr(form_session, 'status') else "in_progress"
+            filled_count = len(filled) if isinstance(filled, dict) else 0
+            total = filled_count + (len(missing) if isinstance(missing, list) else 0)
+            parts = [f"Form status: {status}."]
+            if total > 0:
+                parts.append(f"{filled_count} of {total} fields filled.")
+            if missing:
+                parts.append(f"Still needed: {', '.join(missing[:5])}.")
+                if len(missing) > 5:
+                    parts.append(f"...and {len(missing) - 5} more fields.")
+            return " ".join(parts)
+        except Exception as e:
+            return f"Form is in progress. {str(e)}"
+
+    # ── get_user_profile ────────────────────────────────────
+    elif tool == "get_user_profile":
+        profile = state.get("user_profile") or {}
+        if not profile:
+            return "I don't have your profile information yet. Please complete your profile in the app settings."
+        parts = ["Here's a summary of your profile:"]
+        field_labels = {
+            "full_name": "Name", "name": "Name",
+            "dob": "Date of Birth", "date_of_birth": "Date of Birth",
+            "gender": "Gender",
+            "state": "State", "district": "District", "city": "City",
+            "annual_income": "Annual Income", "income": "Income",
+            "occupation": "Occupation", "category": "Category",
+            "education": "Education", "email": "Email", "phone": "Phone",
+            "aadhaar_number": "Aadhaar", "pan_number": "PAN",
+        }
+        for key, label in field_labels.items():
+            val = profile.get(key)
+            if val:
+                parts.append(f"{label}: {val}")
+        return ". ".join(parts) + "." if len(parts) > 1 else "Your profile has limited information. Please update it."
+
+    # ── get_user_documents ──────────────────────────────────
+    elif tool == "get_user_documents":
+        user_id = state.get("user_id", "")
+        if not user_id:
+            return "User not identified. Please log in."
+        try:
+            docs = await loop.run_in_executor(
+                None, lambda: document_service.get_user_documents(user_id)
+            )
+        except Exception:
+            docs = []
+        if not docs:
+            return "You haven't uploaded any documents yet. You can upload documents like Aadhaar card, PAN card, income certificate etc. from the Documents section."
+        parts = [f"You have {len(docs)} document{'s' if len(docs) != 1 else ''} uploaded:"]
+        for d in docs[:8]:
+            doc_type = d.get("document_type", "unknown")
+            name = d.get("ai_generated_name") or d.get("original_filename") or doc_type
+            parts.append(f"- {name} ({doc_type})")
+        if len(docs) > 8:
+            parts.append(f"...and {len(docs) - 8} more.")
+        return "\n".join(parts)
+
+    # ── check_documents ─────────────────────────────────────
+    elif tool == "check_documents":
+        scheme_id = params.get("scheme_id", "")
+        if not scheme_id:
+            return "Please specify which scheme you'd like me to check documents for."
+        user_id = state.get("user_id", "")
+        # Get scheme to find required documents
+        scheme = await loop.run_in_executor(
+            None, lambda: scheme_service.get_scheme(scheme_id)
+        )
+        if not scheme:
+            return f"I couldn't find scheme {scheme_id}."
+        required = scheme.get("required_documents") or scheme.get("documents_required") or []
+        if not required:
+            return f"The scheme {scheme.get('name', scheme_id)} doesn't list specific document requirements."
+        try:
+            check = await loop.run_in_executor(
+                None, lambda: document_service.check_required_documents(user_id, required)
+            )
+        except Exception as e:
+            return f"Error checking documents: {str(e)}"
+        available = check.get("available", [])
+        missing = check.get("missing", [])
+        parts = [f"Document check for {scheme.get('name', scheme_id)}:"]
+        parts.append(f"{len(available)} of {check.get('total_required', 0)} required documents available.")
+        if available:
+            parts.append(f"You have: {', '.join(available)}.")
+        if missing:
+            parts.append(f"Missing: {', '.join(missing)}. Please upload these documents.")
+        else:
+            parts.append("You have all required documents!")
+        return " ".join(parts)
+
+    else:
+        return f"Unknown tool: {tool}. I can help with searching schemes, checking eligibility, filling forms, or managing documents."
 
 
 async def _handle_voice_transcript(websocket: WebSocket, state: dict, msg: dict):

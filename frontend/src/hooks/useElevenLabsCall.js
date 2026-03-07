@@ -4,16 +4,19 @@
  * Uses ElevenLabs agent (WebRTC) for voice conversation:
  *   - Low-latency speech-to-speech via ElevenLabs cloud
  *   - Agent handles STT + AI reasoning + TTS natively
+ *   - Client tools let the agent trigger backend actions (form fill, scheme search, etc.)
  *
  * Simultaneously connects to our backend WebSocket for:
  *   - Form filling (Playwright browser automation)
+ *   - Scheme search, eligibility checks, profile/documents
  *   - Form screenshots / progress updates
  *   - OTP / CAPTCHA interaction
  *
  * Architecture:
  *   User speaks → ElevenLabs Agent (voice AI) → speaks back
- *                  ↓ transcripts
- *              Backend WS → Form Agent → Playwright → screenshots → Frontend
+ *                  ↓ client tools          ↓ transcripts
+ *              Backend WS → Actions (form, schemes, docs) → results → Agent speaks
+ *                         → Form Agent → Playwright → screenshots → Frontend
  */
 import { useRef, useCallback, useEffect } from 'react';
 import { useConversation } from '@elevenlabs/react';
@@ -49,11 +52,35 @@ export default function useElevenLabsCall({
   const schemeIdRef = useRef(schemeId);
   const volIntervalRef = useRef(null);
   const currentAudioRef = useRef(null); // currently playing MP3 Audio element
+  const pendingToolCallsRef = useRef({}); // { callId: { resolve, reject, timer } }
 
   // Keep refs in sync
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { schemeIdRef.current = schemeId; }, [schemeId]);
+
+  // ─── Call backend tool via WebSocket (request-response pattern) ────
+  const callBackendTool = useCallback((toolName, params = {}) => {
+    return new Promise((resolve, reject) => {
+      if (backendWsRef.current?.readyState !== WebSocket.OPEN) {
+        resolve('Backend not connected. Please try again.');
+        return;
+      }
+      const callId = `tc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      // Set a timeout so the agent doesn't hang forever
+      const timer = setTimeout(() => {
+        delete pendingToolCallsRef.current[callId];
+        resolve('The action is still processing. I\'ll let you know when it completes.');
+      }, 15000);
+      pendingToolCallsRef.current[callId] = { resolve, reject, timer };
+      backendWsRef.current.send(JSON.stringify({
+        type: 'tool_call',
+        call_id: callId,
+        tool: toolName,
+        params,
+      }));
+    });
+  }, []);
 
   // ─── ElevenLabs conversation hook ─────────────────
   const elevenLabs = useConversation({
@@ -92,6 +119,59 @@ export default function useElevenLabsCall({
         onStatusChange?.('listening');
       }
     },
+    // ─── Client Tools: actions the ElevenLabs agent can trigger ─────────
+    clientTools: {
+      // Search for government schemes
+      search_schemes: async (params) => {
+        console.log('[ClientTool] search_schemes', params);
+        return await callBackendTool('search_schemes', {
+          query: params.query || '',
+          category: params.category || '',
+        });
+      },
+
+      // Check eligibility for a specific scheme
+      check_eligibility: async (params) => {
+        console.log('[ClientTool] check_eligibility', params);
+        return await callBackendTool('check_eligibility', {
+          scheme_id: params.scheme_id || params.scheme_name || '',
+        });
+      },
+
+      // Start filling a form for a scheme
+      start_form_filling: async (params) => {
+        console.log('[ClientTool] start_form_filling', params);
+        return await callBackendTool('start_form_filling', {
+          scheme_id: params.scheme_id || params.scheme_name || '',
+        });
+      },
+
+      // Get current form filling progress
+      get_form_status: async (_params) => {
+        console.log('[ClientTool] get_form_status');
+        return await callBackendTool('get_form_status', {});
+      },
+
+      // Get user's profile summary
+      get_user_profile: async (_params) => {
+        console.log('[ClientTool] get_user_profile');
+        return await callBackendTool('get_user_profile', {});
+      },
+
+      // Get list of uploaded documents
+      get_user_documents: async (_params) => {
+        console.log('[ClientTool] get_user_documents');
+        return await callBackendTool('get_user_documents', {});
+      },
+
+      // Check what documents are needed for a scheme
+      check_documents: async (params) => {
+        console.log('[ClientTool] check_documents', params);
+        return await callBackendTool('check_documents', {
+          scheme_id: params.scheme_id || params.scheme_name || '',
+        });
+      },
+    },
   });
 
   // ─── Forward message to backend WebSocket (for form agent) ─────
@@ -107,6 +187,18 @@ export default function useElevenLabsCall({
       case 'session_started':
         if (msg.conversation_id) onConversationId?.(msg.conversation_id);
         break;
+
+      case 'tool_result': {
+        // Response to a client tool call — resolve the pending promise
+        const callId = msg.call_id;
+        const pending = pendingToolCallsRef.current[callId];
+        if (pending) {
+          clearTimeout(pending.timer);
+          delete pendingToolCallsRef.current[callId];
+          pending.resolve(msg.result || 'Done');
+        }
+        break;
+      }
 
       case 'transcript':
         // When ElevenLabs voice call is active, it provides its own transcripts.
@@ -341,6 +433,12 @@ export default function useElevenLabsCall({
         elevenLabs.endSession?.().catch(() => {});
       }
       if (volIntervalRef.current) clearInterval(volIntervalRef.current);
+      // Clean up pending tool calls
+      Object.values(pendingToolCallsRef.current).forEach(p => {
+        clearTimeout(p.timer);
+        p.resolve('Session ended');
+      });
+      pendingToolCallsRef.current = {};
       if (backendWsRef.current) {
         try { backendWsRef.current.send(JSON.stringify({ type: 'session_end' })); } catch { /* ignore */ }
         try { backendWsRef.current.close(); } catch { /* ignore */ }
