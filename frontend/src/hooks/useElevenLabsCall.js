@@ -130,6 +130,12 @@ export default function useElevenLabsCall({
         });
       },
 
+      // Match eligible schemes based on user profile
+      match_schemes: async (_params) => {
+        console.log('[ClientTool] match_schemes');
+        return await callBackendTool('match_schemes', {});
+      },
+
       // Check eligibility for a specific scheme
       check_eligibility: async (params) => {
         console.log('[ClientTool] check_eligibility', params);
@@ -150,6 +156,27 @@ export default function useElevenLabsCall({
       get_form_status: async (_params) => {
         console.log('[ClientTool] get_form_status');
         return await callBackendTool('get_form_status', {});
+      },
+
+      // Get which form fields are still missing
+      get_missing_fields: async (_params) => {
+        console.log('[ClientTool] get_missing_fields');
+        return await callBackendTool('get_missing_fields', {});
+      },
+
+      // Provide data for a specific form field
+      provide_field_data: async (params) => {
+        console.log('[ClientTool] provide_field_data', params);
+        return await callBackendTool('provide_field_data', {
+          field_name: params.field_name || '',
+          value: params.value || '',
+        });
+      },
+
+      // Stop the current form filling session
+      stop_form_filling: async (_params) => {
+        console.log('[ClientTool] stop_form_filling');
+        return await callBackendTool('stop_form_filling', {});
       },
 
       // Get user's profile summary

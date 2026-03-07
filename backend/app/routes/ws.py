@@ -524,6 +524,31 @@ async def _dispatch_tool(tool: str, params: dict, state: dict,
             parts.append(ai["summary"])
         return " ".join(parts)
 
+    # ── match_schemes ───────────────────────────────────────
+    elif tool == "match_schemes":
+        user_profile = state.get("user_profile") or {}
+        if not user_profile:
+            return "I don't have your profile information yet. Please complete your profile so I can match schemes for you."
+        matches = await loop.run_in_executor(
+            None, lambda: scheme_service.match_schemes(user_profile)
+        )
+        if not matches:
+            return "I couldn't find any schemes matching your profile. Try updating your profile with more details."
+        top = matches[:5]
+        lines = [f"Based on your profile, I found {len(matches)} matching scheme{'s' if len(matches) != 1 else ''}:"]
+        for i, m in enumerate(top, 1):
+            name = m.get("name", "Unknown")
+            score = m.get("match_score", 0)
+            status = m.get("eligibility_status", "")
+            benefit = m.get("benefit_amount") or m.get("benefit_description") or ""
+            line = f"{i}. {name} — {score}% match ({status})"
+            if benefit:
+                line += f", benefit: {benefit}"
+            lines.append(line)
+        if len(matches) > 5:
+            lines.append(f"...and {len(matches) - 5} more. Would you like details on any of these?")
+        return "\n".join(lines)
+
     # ── start_form_filling ──────────────────────────────────
     elif tool == "start_form_filling":
         scheme_id = params.get("scheme_id", "")
@@ -533,9 +558,35 @@ async def _dispatch_tool(tool: str, params: dict, state: dict,
         if state.get("form_session"):
             return "A form filling session is already in progress. You can ask me for the form status or wait for it to complete."
         state["scheme_id"] = scheme_id
+
+        # Enrich user_data with document-extracted fields for better auto-fill
+        user_data = dict(state.get("user_profile") or {})
+        try:
+            doc_map = await loop.run_in_executor(
+                None, lambda: document_service.get_document_map_for_form(state.get("user_id", ""))
+            )
+            if doc_map:
+                for k, v in doc_map.items():
+                    if v and k not in user_data:
+                        user_data[k] = v
+        except Exception:
+            pass
+        state["user_profile"] = user_data
+
         await _start_form_agent(websocket, state)
         if state.get("form_session"):
-            return f"I've started filling the form for scheme {scheme_id}. You'll see the live browser on your screen. I'll let you know when I need any input from you."
+            session = state["form_session"]
+            missing = session.get_missing_fields()
+            prefilled = len(session.collected_fields)
+            msg = f"I've started filling the form for scheme {scheme_id}. You'll see the live browser on your screen."
+            if prefilled:
+                msg += f" I've pre-filled {prefilled} fields from your profile and documents."
+            if missing:
+                msg += f" I still need {len(missing)} fields: {', '.join(missing[:5])}."
+                if len(missing) > 5:
+                    msg += f" And {len(missing) - 5} more."
+                msg += " Please tell me the information and I'll fill them in."
+            return msg
         else:
             return f"I wasn't able to start the form for scheme {scheme_id}. The scheme portal might be unavailable."
 
@@ -545,21 +596,60 @@ async def _dispatch_tool(tool: str, params: dict, state: dict,
         if not form_session:
             return "There's no active form filling session right now. Would you like me to start one?"
         try:
-            filled = form_session.filled_fields if hasattr(form_session, 'filled_fields') else {}
-            missing = form_session.missing_fields if hasattr(form_session, 'missing_fields') else []
-            status = form_session.status if hasattr(form_session, 'status') else "in_progress"
-            filled_count = len(filled) if isinstance(filled, dict) else 0
-            total = filled_count + (len(missing) if isinstance(missing, list) else 0)
-            parts = [f"Form status: {status}."]
-            if total > 0:
-                parts.append(f"{filled_count} of {total} fields filled.")
-            if missing:
-                parts.append(f"Still needed: {', '.join(missing[:5])}.")
-                if len(missing) > 5:
-                    parts.append(f"...and {len(missing) - 5} more fields.")
+            filled_labels = form_session.get_filled_fields()
+            missing_labels = form_session.get_missing_fields()
+            total = form_session.total_fields
+            waiting = form_session.waiting_for  # 'otp' | 'captcha' | None
+            page = f"page {form_session.current_page} of {form_session.total_pages}"
+            parts = [f"Form progress: {len(filled_labels)} of {total} fields filled ({page})."]
+            if waiting == "otp":
+                parts.append("I'm currently waiting for an OTP. Please check your phone and tell me the code.")
+            elif waiting == "captcha":
+                parts.append("There's a CAPTCHA on screen. Please read it and tell me what it says.")
+            if missing_labels:
+                parts.append(f"Still needed: {', '.join(missing_labels[:5])}.")
+                if len(missing_labels) > 5:
+                    parts.append(f"And {len(missing_labels) - 5} more.")
+            elif not waiting:
+                parts.append("All fields are filled!")
             return " ".join(parts)
         except Exception as e:
             return f"Form is in progress. {str(e)}"
+
+    # ── get_missing_fields ──────────────────────────────────
+    elif tool == "get_missing_fields":
+        form_session = state.get("form_session")
+        if not form_session:
+            return "No active form session. Start a form first."
+        missing = form_session.get_missing_fields()
+        if not missing:
+            return "All fields are already filled! The form is ready for submission."
+        return f"I still need these {len(missing)} fields: {', '.join(missing)}. Please provide the information one by one."
+
+    # ── provide_field_data ──────────────────────────────────
+    elif tool == "provide_field_data":
+        form_session = state.get("form_session")
+        if not form_session:
+            return "No active form session. Start a form first."
+        field_name = params.get("field_name", "")
+        field_value = params.get("value", "")
+        if not field_name or not field_value:
+            return "Please provide both the field name and value."
+        # Update collected fields directly
+        form_session.collected_fields[field_name] = str(field_value).strip()
+        # Trigger browser fill for this field
+        try:
+            await form_session._fill_fields_in_browser([field_name])
+        except Exception:
+            try:
+                await form_session._fill_real_portal([field_name])
+            except Exception:
+                pass
+        remaining = form_session.get_missing_fields()
+        if remaining:
+            return f"Got it, I've filled in {field_name}. {len(remaining)} fields remaining: {', '.join(remaining[:3])}."
+        else:
+            return f"Got it, I've filled in {field_name}. All fields are now filled! The form is ready."
 
     # ── get_user_profile ────────────────────────────────────
     elif tool == "get_user_profile":
@@ -637,6 +727,18 @@ async def _dispatch_tool(tool: str, params: dict, state: dict,
         else:
             parts.append("You have all required documents!")
         return " ".join(parts)
+
+    # ── stop_form_filling ───────────────────────────────────
+    elif tool == "stop_form_filling":
+        form_session = state.get("form_session")
+        if not form_session:
+            return "There's no active form session to stop."
+        try:
+            await form_session.close()
+        except Exception:
+            pass
+        state.pop("form_session", None)
+        return "Form filling session has been stopped. The browser is closed."
 
     else:
         return f"Unknown tool: {tool}. I can help with searching schemes, checking eligibility, filling forms, or managing documents."
