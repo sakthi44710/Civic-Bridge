@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
     # AI Services - Llama 3 70B (via Converse API)
-    BEDROCK_MODEL_ID: str = "meta.llama3-70b-instruct-v1:0"   # Fast chat + general tasks
-    BEDROCK_SMART_MODEL: str = "meta.llama3-70b-instruct-v1:0" # Deep analysis + eligibility
+    BEDROCK_MODEL_ID: str = "anthropic.claude-sonnet-4-6"   # Fast chat + general tasks
+    BEDROCK_SMART_MODEL: str = "anthropic.claude-sonnet-4-6"  # Deep analysis + eligibility
     
     # JWT Settings
     JWT_SECRET: str = "your-secret-key-change-in-production"

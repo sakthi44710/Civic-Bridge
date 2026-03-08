@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict
-from app.services.automation_service import automation_service
+from app.services.form_agent_service import form_agent_service
 from app.services.tracking_service import tracking_service
 from app.services.document_service import document_service
 from app.services.scheme_service import scheme_service
@@ -134,13 +134,17 @@ async def start_automation(application_id: str, user_id: str = Depends(get_curre
         documents = []
     
     try:
-        result = await automation_service.start_automation(
+        scheme = scheme_service.get_scheme(app["scheme_id"])
+        portal_url = (scheme or {}).get("portal_url") or (scheme or {}).get("application_url", "")
+        session = await form_agent_service.start_session(
             user_id=user_id,
-            application_id=application_id,
             scheme_id=app["scheme_id"],
+            application_id=application_id,
             user_data=user or {},
-            documents=documents
+            portal_url=portal_url,
+            websocket=None,
         )
+        result = {"status": "started", "session_id": session.session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Automation failed: {str(e)}")
     
@@ -153,13 +157,11 @@ async def verify_page(
     request: VerifyPageRequest,
     user_id: str = Depends(get_current_user)
 ):
-    """Verify or correct a filled page"""
-    result = await automation_service.verify_page(
-        user_id=user_id,
-        application_id=application_id,
-        approved=request.approved,
-        corrections=request.corrections
-    )
+    """Verify or correct a filled page — now handled via WebSocket form agent"""
+    session = form_agent_service.get_session(user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No active form session")
+    result = {"status": "ok", "session_id": session.session_id}
     return result
 
 
@@ -170,7 +172,7 @@ async def submit_otp(
     user_id: str = Depends(get_current_user)
 ):
     """Submit OTP for portal verification"""
-    result = await automation_service.submit_otp(user_id, application_id, request.otp)
+    result = await form_agent_service.submit_otp(user_id, request.otp)
     return result
 
 
@@ -181,21 +183,26 @@ async def submit_captcha(
     user_id: str = Depends(get_current_user)
 ):
     """Submit CAPTCHA solution"""
-    result = await automation_service.submit_captcha(user_id, application_id, request.captcha_text)
+    result = await form_agent_service.submit_captcha(user_id, request.captcha_text)
     return result
 
 
 @router.post("/{application_id}/submit")
 async def final_submit(application_id: str, user_id: str = Depends(get_current_user)):
     """Final submission of the application"""
-    result = await automation_service.final_submit(user_id, application_id)
+    session = form_agent_service.get_session(user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No active form session")
+    # Close the session (form was submitted in live browser)
+    await form_agent_service.close_session(user_id)
+    result = {"status": "submitted"}
     
     if result.get("status") == "submitted":
         # Update tracking
         tracking_service.update_status(
             user_id, application_id, "submitted",
-            f"Application submitted. Ref: {result.get('acknowledgment_number', '')}",
-            source="automation"
+            "Application submitted via live browser.",
+            source="form_agent"
         )
     
     return result

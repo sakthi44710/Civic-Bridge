@@ -1,7 +1,7 @@
-"""AWS Bedrock Service - Llama 3 70B via Converse API
+"""AWS Bedrock Service - Claude Sonnet 4.6 via Converse API
 
-Llama 3 70B -> Fast chat, document classification, form mapping (~0.3s)
-Llama 3 70B -> Deep reasoning, eligibility analysis (~0.5s)
+Claude Sonnet 4.6 -> Fast chat, document classification, form mapping
+Claude Sonnet 4.6 -> Deep reasoning, eligibility analysis
 
 Uses the universal Converse API (works with all Bedrock models).
 """
@@ -115,7 +115,7 @@ class BedrockService:
 
     def __init__(self):
         self.client = aws.bedrock_runtime()
-        self.chat_model = settings.BEDROCK_MODEL_ID       # Llama 3 70B - fast
+        self.chat_model = settings.BEDROCK_MODEL_ID       # Claude Sonnet 4.6 - fast
         self.smart_model = settings.BEDROCK_SMART_MODEL    # Llama 3 70B - deep
 
     # ============================================================

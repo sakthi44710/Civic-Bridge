@@ -1,955 +1,234 @@
+﻿"""
+ws.py -- WebSocket endpoint for CivicBridge
+
+Role of this WebSocket:
+  1. Receive tool_call messages from ElevenLabs agent (via frontend)
+  2. Dispatch to correct backend service (form filling, scheme search, etc.)
+  3. Return tool_result back to ElevenLabs agent
+  4. Push form_update progress events to frontend
+  5. Relay OTP / CAPTCHA answers to the live browser
+
+What this WebSocket does NOT do:
+  - Generate AI responses (ElevenLabs main agent owns that)
+  - Send screenshots (noVNC port 6080 handles the live visual)
+  - Do TTS / speech synthesis
 """
-WebSocket Routes - Real-time Voice + Live Form Projection
 
-This WebSocket endpoint handles:
-  1. ElevenLabs voice agent tool calls + form filling coordination
-  2. Live form-filling updates from the background agent
-  3. Real-time status updates
-
-Voice is handled entirely by ElevenLabs (WebRTC). This WS is for
-tool dispatch, form updates, and text chat only.
-
-Protocol (JSON messages over WebSocket):
-
-Frontend → Backend:
-  {"type": "session_start", "language": "hi", "conversation_id": "...", "scheme_id": "..."}
-  {"type": "text_message", "data": "user typed text"}
-  {"type": "voice_transcript", "data": "user speech from ElevenLabs"}
-  {"type": "assistant_message", "data": "ElevenLabs AI response"}
-  {"type": "tool_call", "call_id": "...", "tool": "...", "params": {...}}
-  {"type": "start_form", "scheme_id": "..."}
-  {"type": "submit_otp", "otp": "..."}
-  {"type": "submit_captcha", "text": "..."}
-  {"type": "session_end"}
-
-Backend → Frontend:
-  {"type": "session_started", "conversation_id": "...", "form_session": "..."}
-  {"type": "transcript", "role": "user|assistant", "text": "..."}
-  {"type": "status", "status": "listening|processing|idle"}
-  {"type": "form_update", "data": {...fields, screenshot, progress...}}
-  {"type": "form_started", "scheme_id": "...", "session_id": "..."}
-  {"type": "tool_result", "call_id": "...", "result": "..."}
-  {"type": "error", "message": "..."}
-"""
 import asyncio
-import json
 import logging
-import re
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from typing import Optional
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from typing import Dict, Any
 
-from app.services.form_agent_service import form_agent_service, FormFillingSession
-from app.services.scheme_service import scheme_service
-from app.services.agent_orchestrator import orchestrator
-from app.services.dynamodb_service import db
-from app.services.document_service import document_service
-from app.services.translate_service import translate_service
-from app.utils.auth import decode_token_unsafe
-from app.utils.helpers import generate_id, now_iso
+from ..services.form_agent_service import form_agent_service
+from ..services.scheme_service import scheme_service
+from ..services.document_service import document_service
+from ..utils.auth import decode_token_unsafe
+from ..services.dynamodb_service import db
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(tags=["WebSocket"])
-
-
-def _authenticate_ws(token: str) -> Optional[str]:
-    """Authenticate WebSocket connection from token."""
-    if not token:
-        return None
-    try:
-        # Try to decode the token
-        user_id = decode_token_unsafe(token)
-        return user_id
-    except Exception:
-        return None
+router = APIRouter()
 
 
 @router.websocket("/ws/voice")
-async def voice_websocket(
-    websocket: WebSocket,
-    token: str = Query(default=""),
-):
-    """
-    Main WebSocket endpoint for real-time voice conversation + live form filling.
-    
-    Flow:
-      1. Client connects with auth token
-      2. Client sends session_start with language and optional scheme_id
-      3. If Nova Sonic is available:
-         - Opens bidirectional stream to Nova Sonic
-         - Audio flows directly: client ↔ Nova Sonic
-         - Transcripts feed the form agent
-      4. If Nova Sonic is NOT available (fallback):
-         - Uses existing STT (Transcribe) + Chat (Bedrock) + TTS (Polly)
-         - But streams via WebSocket instead of REST for lower perceived latency
-      5. Form agent watches conversation → fills Playwright form → sends screenshots
-    """
+async def voice_websocket(websocket: WebSocket, token: str):
     await websocket.accept()
 
-    # Authenticate
-    user_id = _authenticate_ws(token)
+    user_id = decode_token_unsafe(token)
     if not user_id:
-        # Dev mode: use a default user ID
-        user_id = f"dev-ws-{generate_id()[:8]}"
-        logger.warning(f"WebSocket: No auth token, using dev user: {user_id}")
+        await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        await websocket.close()
+        return
 
-    # Session state
-    session_state = {
+    # Load user profile
+    try:
+        user = db.get_user(user_id) or {"user_id": user_id}
+    except Exception:
+        user = {"user_id": user_id}
+    session_state: Dict[str, Any] = {
         "user_id": user_id,
+        "user_profile": user,
         "conversation_id": None,
         "language": "en",
         "scheme_id": None,
-        "form_session": None,
-        "conversation_history": [],
-        "user_profile": {},
     }
 
+    logger.info(f"[WS] Connected: {user_id}")
+
     try:
-        # Load user profile
-        try:
-            session_state["user_profile"] = db.get_user(user_id) or {}
-        except Exception:
-            pass
-
-        # Load document context for RAG (done once at WS connect)
-        try:
-            session_state["document_context"] = document_service.get_user_document_context(user_id)
-        except Exception:
-            session_state["document_context"] = ""
-
-        # Main message loop
         while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
-            msg_type = msg.get("type", "")
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
 
             if msg_type == "session_start":
-                await _handle_session_start(websocket, session_state, msg)
-
-            elif msg_type == "text_message":
-                await _handle_text_message(websocket, session_state, msg)
-
-            elif msg_type == "voice_transcript":
-                # User speech transcript from ElevenLabs — feed to form agent
-                # and detect form triggers, but DON'T run backend AI (ElevenLabs handles it)
-                await _handle_voice_transcript(websocket, session_state, msg)
-
-            elif msg_type == "assistant_message":
-                # ElevenLabs agent response forwarded from frontend — feed to form agent
-                # Also check if the AI mentioned form filling (backup trigger)
-                assistant_text = str(msg.get("data", "")).strip()
-                if assistant_text:
-                    form_session = session_state.get("form_session")
-                    if form_session:
-                        await form_session.on_conversation_text("assistant", assistant_text)
-                    # Save to history so form context builds correctly
-                    session_state.setdefault("conversation_history", []).append(
-                        {"role": "assistant", "content": assistant_text}
-                    )
-
-            elif msg_type == "start_form":
-                # Client explicitly starts a form session (e.g. user picks a scheme)
-                scheme_id = msg.get("scheme_id")
-                if scheme_id:
-                    session_state["scheme_id"] = scheme_id
-                    await _start_form_agent(websocket, session_state)
-                    await websocket.send_json({
-                        "type": "form_started",
-                        "scheme_id": scheme_id,
-                        "session_id": session_state["form_session"].session_id if session_state.get("form_session") else None,
-                    })
-
-            elif msg_type == "submit_otp":
-                # User speaks / types the OTP — relay to live browser
-                form_session = session_state.get("form_session")
-                if form_session:
-                    otp = str(msg.get("otp", "")).strip()
-                    await form_session.submit_otp(otp)
-                else:
-                    await websocket.send_json({"type": "error", "message": "No active form session"})
-
-            elif msg_type == "submit_captcha":
-                # User types the CAPTCHA answer — relay to live browser
-                form_session = session_state.get("form_session")
-                if form_session:
-                    captcha_text = str(msg.get("text", "")).strip()
-                    await form_session.submit_captcha(captcha_text)
-                else:
-                    await websocket.send_json({"type": "error", "message": "No active form session"})
+                session_state["language"] = data.get("language", "en")
+                session_state["conversation_id"] = data.get("conversation_id")
+                await websocket.send_json({
+                    "type": "session_started",
+                    "conversation_id": session_state["conversation_id"],
+                    "novnc_ready": True,
+                    # Frontend uses this path to embed noVNC iframe
+                    "novnc_path": "/vnc.html?autoconnect=true&resize=scale",
+                })
 
             elif msg_type == "tool_call":
-                # ElevenLabs client tool → backend action dispatch
-                await _handle_tool_call(websocket, session_state, msg)
+                # ElevenLabs main agent is calling a backend tool
+                call_id = data.get("call_id")
+                tool = data.get("tool")
+                params = data.get("params", {})
+                result = await _dispatch_tool(tool, params, session_state, websocket)
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "call_id": call_id,
+                    "result": result,
+                })
+
+            elif msg_type == "submit_otp":
+                # User entered OTP in the modal overlay
+                result = await form_agent_service.submit_otp(user_id, data.get("otp", ""))
+                await websocket.send_json({"type": "otp_accepted", "success": result.get("success")})
+
+            elif msg_type == "submit_captcha":
+                # User typed CAPTCHA answer in the modal overlay
+                result = await form_agent_service.submit_captcha(user_id, data.get("text", ""))
+                await websocket.send_json({"type": "captcha_accepted", "success": result.get("success")})
+
+            elif msg_type == "voice_transcript":
+                # User speech from ElevenLabs -- log only, no backend AI call
+                # ElevenLabs handles all conversation intelligence
+                logger.debug(f"[WS] User transcript: {data.get('data', '')[:80]}")
+
+            elif msg_type == "assistant_message":
+                # ElevenLabs agent reply -- log only
+                logger.debug(f"[WS] Agent message: {data.get('data', '')[:80]}")
 
             elif msg_type == "session_end":
-                await _handle_session_end(websocket, session_state)
+                await form_agent_service.close_session(user_id)
                 break
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected: {user_id}")
+        logger.info(f"[WS] Disconnected: {user_id}")
+        await form_agent_service.close_session(user_id)
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        try:
-            await websocket.send_json({"type": "error", "message": str(e)})
-        except Exception:
-            pass
-    finally:
-        await _cleanup_session(session_state)
+        logger.error(f"[WS] Error {user_id}: {e}")
+        await form_agent_service.close_session(user_id)
 
 
-# ═══════════════════════════════════════════════════════════
-# Message Handlers
-# ═══════════════════════════════════════════════════════════
-
-async def _handle_session_start(websocket: WebSocket, state: dict, msg: dict):
-    """Handle session_start message — initialize session + form agent."""
-    state["language"] = msg.get("language", "en")
-    state["conversation_id"] = msg.get("conversation_id") or generate_id()
-    state["scheme_id"] = msg.get("scheme_id")
-
-    # Load conversation history
-    try:
-        conv = db.get_conversation(state["user_id"], state["conversation_id"])
-        if conv and conv.get("messages"):
-            messages = conv["messages"]
-            if isinstance(messages, str):
-                messages = json.loads(messages)
-            state["conversation_history"] = [
-                {"role": m.get("role"), "content": m.get("content_en", m.get("content", ""))}
-                for m in (messages or [])[-6:]
-            ]
-    except Exception:
-        pass
-
-    # Start form agent if scheme is specified
-    if state.get("scheme_id"):
-        await _start_form_agent(websocket, state)
-
-    # Notify client
-    await websocket.send_json({
-        "type": "session_started",
-        "conversation_id": state["conversation_id"],
-        "form_session": state["form_session"].session_id if state.get("form_session") else None,
-    })
-
-    await websocket.send_json({"type": "status", "status": "listening"})
-
-
-async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
-    """Handle text message from the client (typed or speech-recognised input).
-    Serialised: if another message is already being processed we buffer this one
-    and merge it so the user never gets duplicate parallel responses."""
-    text = msg.get("data", "").strip()
-    if not text:
-        return
-
-    # ── Serialise: only one AI call at a time per session ──────────
-    if state.get("_text_processing"):
-        # Another request is in-flight — append to pending buffer
-        state.setdefault("_text_pending", [])
-        state["_text_pending"].append(text)
-        logger.debug("Text message queued (AI busy): %s", text[:60])
-        return
-
-    state["_text_processing"] = True
-
-    # Merge any previously-queued text that arrived while we were busy
-    pending = state.pop("_text_pending", [])
-    if pending:
-        text = " ".join(pending) + " " + text
-
-    await websocket.send_json({"type": "status", "status": "processing"})
-
-    # Send user transcript to frontend
-    await websocket.send_json({
-        "type": "transcript",
-        "role": "user",
-        "text": text,
-    })
-
-    # Feed to form agent (background — does not block AI response)
-    if state.get("form_session"):
-        await state["form_session"].on_conversation_text("user", text)
-
-    # Build form context so the AI knows which fields to ask about
-    form_context = _build_form_context(state)
-
-    # Process through conversation agent
-    try:
-        ai_result = await orchestrator.process(
-            user_message=text,
-            conversation_history=state.get("conversation_history", []),
-            user_profile=state.get("user_profile", {}),
-            language=state.get("language", "en"),
-            conversation_id=state.get("conversation_id"),
-            document_context=state.get("document_context", ""),
-            form_context=form_context,
-        )
-
-        ai_response = ai_result.get("message", "") if isinstance(ai_result, dict) else str(ai_result)
-        if not ai_response or ai_response == str(ai_result):
-            # Fallback: use generic acknowledgement instead of raw dict dump
-            ai_response = "I'm processing your request. Let me help you with that."
-        # Strip any leaked JSON/metadata fragments from the AI response
-        ai_response = _strip_json_artifacts(ai_response)
-
-        # Send AI transcript
-        await websocket.send_json({
-            "type": "transcript",
-            "role": "assistant",
-            "text": ai_response,
-        })
-
-        # Feed AI response to form agent
-        if state.get("form_session"):
-            await state["form_session"].on_conversation_text("assistant", ai_response)
-
-        # Check if we should start form filling
-        if not state.get("form_session"):
-            should_start, scheme_id = _should_start_form(text, ai_result, state)
-            if should_start:
-                state["scheme_id"] = scheme_id
-                await _start_form_agent(websocket, state)
-                await websocket.send_json({
-                    "type": "form_started",
-                    "scheme_id": scheme_id,
-                    "session_id": state["form_session"].session_id if state.get("form_session") else None,
-                })
-
-            # Send form update if present
-            form_update = ai_result.get("form_update")
-            if form_update:
-                await websocket.send_json({"type": "form_update", "data": form_update})
-
-        # Save to history
-        state["conversation_history"].append({"role": "user", "content": text})
-        state["conversation_history"].append({"role": "assistant", "content": ai_response})
-        asyncio.ensure_future(_save_message(state, "user", text))
-        asyncio.ensure_future(_save_message(state, "assistant", ai_response))
-
-        # Drain any text that queued up while we were processing
-        _drain = state.pop("_text_pending", [])
-        state["_text_processing"] = False
-        if _drain:
-            merged = " ".join(_drain)
-            asyncio.ensure_future(
-                _handle_text_message(websocket, state, {"data": merged})
-            )
-
-    except Exception as e:
-        logger.error(f"Text message processing error: {e}")
-        state["_text_processing"] = False
-        state.pop("_text_pending", None)
-        await websocket.send_json({"type": "error", "message": str(e)})
-
-    await websocket.send_json({"type": "status", "status": "listening"})
-
-
-# ═════════════════════════════════════════════════════════
-# Tool Call Handler  (ElevenLabs client tools → backend actions)
-# ═════════════════════════════════════════════════════════
-
-async def _handle_tool_call(websocket: WebSocket, state: dict, msg: dict):
+async def _dispatch_tool(tool: str, params: Dict, session_state: Dict, websocket: WebSocket) -> str:
     """
-    Dispatch an ElevenLabs client tool call to the appropriate backend service.
-    
-    Protocol:
-        Frontend sends:  { type: "tool_call", call_id: "...", tool: "search_schemes", params: {...} }
-        Backend replies:  { type: "tool_result", call_id: "...", result: "readable string" }
-    
-    The result string is returned to the ElevenLabs agent so it can speak
-    the answer back to the user.
+    Route ElevenLabs tool_call to correct backend service.
+    Always returns a plain string -- ElevenLabs agent speaks this to the user.
     """
-    call_id = msg.get("call_id", "")
-    tool = msg.get("tool", "")
-    params = msg.get("params", {})
-
-    logger.info(f"Tool call: {tool} (call_id={call_id}) params={params}")
+    user_id = session_state["user_id"]
+    profile = session_state["user_profile"]
 
     try:
-        result = await _dispatch_tool(tool, params, state, websocket)
-    except Exception as e:
-        logger.error(f"Tool call error ({tool}): {e}")
-        result = f"Sorry, there was an error processing that request: {str(e)}"
-
-    await websocket.send_json({
-        "type": "tool_result",
-        "call_id": call_id,
-        "result": result,
-    })
-
-
-async def _dispatch_tool(tool: str, params: dict, state: dict,
-                          websocket: WebSocket) -> str:
-    """Route a tool call to the correct service and return a speakable result."""
-    loop = asyncio.get_event_loop()
-
-    # ── search_schemes ──────────────────────────────────────
-    if tool == "search_schemes":
-        query = params.get("query", "")
-        category = params.get("category", "")
-        user_state = (state.get("user_profile") or {}).get("state", "")
-        schemes = await loop.run_in_executor(
-            None,
-            lambda: scheme_service.search_schemes(
-                query=query or None, category=category or None, state=user_state or None
-            ),
-        )
-        if not schemes:
-            return "I couldn't find any schemes matching your search. Try different keywords or a broader category."
-        # Limit to top 5 for spoken response
-        top = schemes[:5]
-        lines = [f"I found {len(schemes)} scheme{'s' if len(schemes) != 1 else ''}. Here are the top results:"]
-        for i, s in enumerate(top, 1):
-            name = s.get("name", "Unknown")
-            desc = (s.get("description") or "")[:120]
-            benefit = s.get("benefit_amount") or s.get("benefit_description") or ""
-            line = f"{i}. {name}"
-            if benefit:
-                line += f" — benefit: {benefit}"
-            if desc:
-                line += f". {desc}"
-            lines.append(line)
-        if len(schemes) > 5:
-            lines.append(f"...and {len(schemes) - 5} more. Would you like me to narrow the search?")
-        return "\n".join(lines)
-
-    # ── check_eligibility ───────────────────────────────────
-    elif tool == "check_eligibility":
-        scheme_id = params.get("scheme_id", "")
-        if not scheme_id:
-            return "Please specify which scheme you'd like me to check your eligibility for."
-        user_profile = state.get("user_profile") or {}
-        result = await loop.run_in_executor(
-            None,
-            lambda: scheme_service.check_eligibility(user_profile, scheme_id),
-        )
-        if result.get("error"):
-            return f"I couldn't find that scheme. {result['error']}"
-        status = result.get("status", "unknown")
-        score = result.get("match_score", 0)
-        met = result.get("met_criteria", [])
-        unmet = result.get("unmet_criteria", [])
-        missing = result.get("missing_info", [])
-        parts = [f"Eligibility check result: {status} (match score {score}%)."]
-        if met:
-            parts.append(f"Criteria met: {', '.join(met)}.")
-        if unmet:
-            parts.append(f"Criteria not met: {', '.join(unmet)}.")
-        if missing:
-            parts.append(f"Missing information: {', '.join(missing)}. Please update your profile.")
-        # Include AI analysis if available
-        ai = result.get("ai_analysis")
-        if isinstance(ai, dict) and ai.get("summary"):
-            parts.append(ai["summary"])
-        return " ".join(parts)
-
-    # ── match_schemes ───────────────────────────────────────
-    elif tool == "match_schemes":
-        user_profile = state.get("user_profile") or {}
-        if not user_profile:
-            return "I don't have your profile information yet. Please complete your profile so I can match schemes for you."
-        matches = await loop.run_in_executor(
-            None, lambda: scheme_service.match_schemes(user_profile)
-        )
-        if not matches:
-            return "I couldn't find any schemes matching your profile. Try updating your profile with more details."
-        top = matches[:5]
-        lines = [f"Based on your profile, I found {len(matches)} matching scheme{'s' if len(matches) != 1 else ''}:"]
-        for i, m in enumerate(top, 1):
-            name = m.get("name", "Unknown")
-            score = m.get("match_score", 0)
-            status = m.get("eligibility_status", "")
-            benefit = m.get("benefit_amount") or m.get("benefit_description") or ""
-            line = f"{i}. {name} — {score}% match ({status})"
-            if benefit:
-                line += f", benefit: {benefit}"
-            lines.append(line)
-        if len(matches) > 5:
-            lines.append(f"...and {len(matches) - 5} more. Would you like details on any of these?")
-        return "\n".join(lines)
-
-    # ── start_form_filling ──────────────────────────────────
-    elif tool == "start_form_filling":
-        scheme_id = params.get("scheme_id", "")
-        if not scheme_id:
-            return "Please tell me which scheme form you'd like me to fill."
-        # Check if a form session is already running
-        if state.get("form_session"):
-            return "A form filling session is already in progress. You can ask me for the form status or wait for it to complete."
-        state["scheme_id"] = scheme_id
-
-        # Enrich user_data with document-extracted fields for better auto-fill
-        user_data = dict(state.get("user_profile") or {})
-        try:
-            doc_map = await loop.run_in_executor(
-                None, lambda: document_service.get_document_map_for_form(state.get("user_id", ""))
+        if tool == "search_schemes":
+            results = await scheme_service.search_schemes(
+                query=params.get("query", ""), category=params.get("category"), state=profile.get("state")
             )
-            if doc_map:
-                for k, v in doc_map.items():
-                    if v and k not in user_data:
-                        user_data[k] = v
-        except Exception:
-            pass
-        state["user_profile"] = user_data
+            if not results:
+                return "No schemes found."
+            return f"Found {len(results)} schemes: {', '.join(s.get('name','') for s in results[:5])}"
 
-        await _start_form_agent(websocket, state)
-        if state.get("form_session"):
-            session = state["form_session"]
-            missing = session.get_missing_fields()
-            prefilled = len(session.collected_fields)
-            msg = f"I've started filling the form for scheme {scheme_id}. You'll see the live browser on your screen."
-            if prefilled:
-                msg += f" I've pre-filled {prefilled} fields from your profile and documents."
-            if missing:
-                msg += f" I still need {len(missing)} fields: {', '.join(missing[:5])}."
-                if len(missing) > 5:
-                    msg += f" And {len(missing) - 5} more."
-                msg += " Please tell me the information and I'll fill them in."
-            return msg
-        else:
-            return f"I wasn't able to start the form for scheme {scheme_id}. The scheme portal might be unavailable."
-
-    # ── get_form_status ─────────────────────────────────────
-    elif tool == "get_form_status":
-        form_session = state.get("form_session")
-        if not form_session:
-            return "There's no active form filling session right now. Would you like me to start one?"
-        try:
-            filled_labels = form_session.get_filled_fields()
-            missing_labels = form_session.get_missing_fields()
-            total = form_session.total_fields
-            waiting = form_session.waiting_for  # 'otp' | 'captcha' | None
-            page = f"page {form_session.current_page} of {form_session.total_pages}"
-            parts = [f"Form progress: {len(filled_labels)} of {total} fields filled ({page})."]
-            if waiting == "otp":
-                parts.append("I'm currently waiting for an OTP. Please check your phone and tell me the code.")
-            elif waiting == "captcha":
-                parts.append("There's a CAPTCHA on screen. Please read it and tell me what it says.")
-            if missing_labels:
-                parts.append(f"Still needed: {', '.join(missing_labels[:5])}.")
-                if len(missing_labels) > 5:
-                    parts.append(f"And {len(missing_labels) - 5} more.")
-            elif not waiting:
-                parts.append("All fields are filled!")
-            return " ".join(parts)
-        except Exception as e:
-            return f"Form is in progress. {str(e)}"
-
-    # ── get_missing_fields ──────────────────────────────────
-    elif tool == "get_missing_fields":
-        form_session = state.get("form_session")
-        if not form_session:
-            return "No active form session. Start a form first."
-        missing = form_session.get_missing_fields()
-        if not missing:
-            return "All fields are already filled! The form is ready for submission."
-        return f"I still need these {len(missing)} fields: {', '.join(missing)}. Please provide the information one by one."
-
-    # ── provide_field_data ──────────────────────────────────
-    elif tool == "provide_field_data":
-        form_session = state.get("form_session")
-        if not form_session:
-            return "No active form session. Start a form first."
-        field_name = params.get("field_name", "")
-        field_value = params.get("value", "")
-        if not field_name or not field_value:
-            return "Please provide both the field name and value."
-        # Update collected fields directly
-        form_session.collected_fields[field_name] = str(field_value).strip()
-        # Trigger browser fill for this field
-        try:
-            await form_session._fill_fields_in_browser([field_name])
-        except Exception:
-            try:
-                await form_session._fill_real_portal([field_name])
-            except Exception:
-                pass
-        remaining = form_session.get_missing_fields()
-        if remaining:
-            return f"Got it, I've filled in {field_name}. {len(remaining)} fields remaining: {', '.join(remaining[:3])}."
-        else:
-            return f"Got it, I've filled in {field_name}. All fields are now filled! The form is ready."
-
-    # ── get_user_profile ────────────────────────────────────
-    elif tool == "get_user_profile":
-        profile = state.get("user_profile") or {}
-        if not profile:
-            return "I don't have your profile information yet. Please complete your profile in the app settings."
-        parts = ["Here's a summary of your profile:"]
-        field_labels = {
-            "full_name": "Name", "name": "Name",
-            "dob": "Date of Birth", "date_of_birth": "Date of Birth",
-            "gender": "Gender",
-            "state": "State", "district": "District", "city": "City",
-            "annual_income": "Annual Income", "income": "Income",
-            "occupation": "Occupation", "category": "Category",
-            "education": "Education", "email": "Email", "phone": "Phone",
-            "aadhaar_number": "Aadhaar", "pan_number": "PAN",
-        }
-        for key, label in field_labels.items():
-            val = profile.get(key)
-            if val:
-                parts.append(f"{label}: {val}")
-        return ". ".join(parts) + "." if len(parts) > 1 else "Your profile has limited information. Please update it."
-
-    # ── get_user_documents ──────────────────────────────────
-    elif tool == "get_user_documents":
-        user_id = state.get("user_id", "")
-        if not user_id:
-            return "User not identified. Please log in."
-        try:
-            docs = await loop.run_in_executor(
-                None, lambda: document_service.get_user_documents(user_id)
+        elif tool == "match_schemes":
+            results = await scheme_service.match_schemes(profile)
+            if not results:
+                return "No matching schemes found for your profile."
+            return "Top matches: " + "; ".join(
+                f"{s.get('name')} ({s.get('match_score',0):.0%} match)" for s in results[:3]
             )
-        except Exception:
-            docs = []
-        if not docs:
-            return "You haven't uploaded any documents yet. You can upload documents like Aadhaar card, PAN card, income certificate etc. from the Documents section."
-        parts = [f"You have {len(docs)} document{'s' if len(docs) != 1 else ''} uploaded:"]
-        for d in docs[:8]:
-            doc_type = d.get("document_type", "unknown")
-            name = d.get("ai_generated_name") or d.get("original_filename") or doc_type
-            parts.append(f"- {name} ({doc_type})")
-        if len(docs) > 8:
-            parts.append(f"...and {len(docs) - 8} more.")
-        return "\n".join(parts)
 
-    # ── check_documents ─────────────────────────────────────
-    elif tool == "check_documents":
-        scheme_id = params.get("scheme_id", "")
-        if not scheme_id:
-            return "Please specify which scheme you'd like me to check documents for."
-        user_id = state.get("user_id", "")
-        # Get scheme to find required documents
-        scheme = await loop.run_in_executor(
-            None, lambda: scheme_service.get_scheme(scheme_id)
-        )
-        if not scheme:
-            return f"I couldn't find scheme {scheme_id}."
-        required = scheme.get("required_documents") or scheme.get("documents_required") or []
-        if not required:
-            return f"The scheme {scheme.get('name', scheme_id)} doesn't list specific document requirements."
-        try:
-            check = await loop.run_in_executor(
-                None, lambda: document_service.check_required_documents(user_id, required)
+        elif tool == "check_eligibility":
+            result = await scheme_service.check_eligibility(profile, params.get("scheme_id"))
+            if result.get("eligible"):
+                return f"You are eligible. Score: {result.get('match_score',0):.0%}. {result.get('ai_analysis','')}"
+            return f"Not eligible. Unmet criteria: {', '.join(result.get('unmet_criteria', []))}"
+
+        elif tool == "start_form_filling":
+            scheme_id = params.get("scheme_id")
+            scheme = await scheme_service.get_scheme(scheme_id)
+            if not scheme:
+                return f"Scheme {scheme_id} not found."
+            portal_url = scheme.get("portal_url") or scheme.get("application_url")
+            if not portal_url:
+                return "No portal URL found for this scheme."
+
+            doc_map = await document_service.get_document_map_for_form(user_id)
+            user_data = {**profile, **doc_map}
+
+            session = await form_agent_service.start_session(
+                user_id=user_id, scheme_id=scheme_id,
+                application_id=params.get("application_id", f"app_{user_id}"),
+                user_data=user_data, portal_url=portal_url, websocket=websocket,
             )
-        except Exception as e:
-            return f"Error checking documents: {str(e)}"
-        available = check.get("available", [])
-        missing = check.get("missing", [])
-        parts = [f"Document check for {scheme.get('name', scheme_id)}:"]
-        parts.append(f"{len(available)} of {check.get('total_required', 0)} required documents available.")
-        if available:
-            parts.append(f"You have: {', '.join(available)}.")
-        if missing:
-            parts.append(f"Missing: {', '.join(missing)}. Please upload these documents.")
-        else:
-            parts.append("You have all required documents!")
-        return " ".join(parts)
 
-    # ── stop_form_filling ───────────────────────────────────
-    elif tool == "stop_form_filling":
-        form_session = state.get("form_session")
-        if not form_session:
-            return "There's no active form session to stop."
-        try:
-            await form_session.close()
-        except Exception:
-            pass
-        state.pop("form_session", None)
-        return "Form filling session has been stopped. The browser is closed."
-
-    else:
-        return f"Unknown tool: {tool}. I can help with searching schemes, checking eligibility, filling forms, or managing documents."
-
-
-async def _handle_voice_transcript(websocket: WebSocket, state: dict, msg: dict):
-    """Handle transcripts from ElevenLabs voice AI.
-    Unlike _handle_text_message, this does NOT run the backend AI pipeline.
-    It only:
-      1. Feeds the transcript to the form agent (for field extraction)
-      2. Checks for form-start triggers (regex/keyword detection)
-      3. Saves to conversation history
-    """
-    text = str(msg.get("data", "")).strip()
-    if not text:
-        return
-
-    # Feed to form agent (background)
-    form_session = state.get("form_session")
-    if form_session:
-        await form_session.on_conversation_text("user", text)
-
-    # Check for form trigger — start form agent if not already running
-    if not form_session:
-        should_start, scheme_id = _should_start_form(text, {}, state)
-        if should_start:
-            state["scheme_id"] = scheme_id
-            await _start_form_agent(websocket, state)
+            # Tell frontend to reveal the noVNC iframe panel
             await websocket.send_json({
                 "type": "form_started",
                 "scheme_id": scheme_id,
-                "session_id": state["form_session"].session_id
-                    if state.get("form_session") else None,
+                "session_id": session.session_id,
+                "show_novnc": True,
             })
 
-    # Save to history
-    state.setdefault("conversation_history", []).append(
-        {"role": "user", "content": text}
-    )
-    asyncio.ensure_future(_save_message(state, "user", text))
+            return (
+                f"I've opened the {scheme.get('name')} portal in a live browser. "
+                "You can watch me fill the form in real time on your screen. "
+                "I'm auto-filling your details now."
+            )
 
+        elif tool == "provide_field_data":
+            result = await form_agent_service.provide_field(
+                user_id, params.get("field_name"), params.get("value")
+            )
+            if result.get("success"):
+                return f"Filled {params.get('field_name')} successfully."
+            return f"Could not fill field: {result.get('error')}"
 
-async def _handle_session_end(websocket: WebSocket, state: dict):
-    """Handle session_end message."""
-    await _cleanup_session(state)
-    await websocket.send_json({"type": "status", "status": "idle"})
-    logger.info(f"Session ended for {state['user_id']}")
+        elif tool == "get_form_status":
+            session = form_agent_service.get_session(user_id)
+            if not session:
+                return "No active form session."
+            filled = session.get_filled_fields()
+            missing = session.get_missing_fields()
+            return (
+                f"Progress: {len(filled)}/{session.total_fields} fields filled. "
+                f"Filled: {', '.join(filled[:5]) or 'none'}. "
+                f"Remaining: {', '.join(missing[:5]) or 'none'}."
+            )
 
+        elif tool == "get_missing_fields":
+            session = form_agent_service.get_session(user_id)
+            if not session:
+                return "No active form session."
+            missing = session.get_missing_fields()
+            return "All fields filled! Ready to submit." if not missing else f"Still need: {', '.join(missing)}"
 
-# ═══════════════════════════════════════════════════════════
-# Form Agent
-# ═══════════════════════════════════════════════════════════
+        elif tool == "stop_form_filling":
+            await form_agent_service.close_session(user_id)
+            await websocket.send_json({"type": "form_stopped"})
+            return "Form filling stopped and browser closed."
 
-def _build_form_context(state: dict) -> str:
-    """Build a context string telling the AI about form-filling status.
-    This lets the conversational AI naturally ask the user for missing fields
-    without the AI itself doing the filling — the separate form agent fills."""
-    form_session: FormFillingSession = state.get("form_session")
-    if not form_session or not form_session._running:
-        return ""
+        elif tool == "get_user_profile":
+            return (
+                f"Name: {profile.get('name','N/A')}, Age: {profile.get('age','N/A')}, "
+                f"State: {profile.get('state','N/A')}, Income: {profile.get('annual_income','N/A')}"
+            )
 
-    missing = form_session.get_missing_fields()
-    filled = form_session.get_filled_fields()
+        elif tool == "get_user_documents":
+            docs = await document_service.get_user_documents(user_id)
+            if not docs:
+                return "No documents uploaded yet."
+            return f"Documents: {', '.join(d.get('document_type', d.get('filename','')) for d in docs)}"
 
-    if not missing:
-        return (
-            "[FORM STATUS: A background agent is filling the application form. "
-            "All fields are complete! Let the user know the form is ready for review/submission.]"
-        )
+        elif tool == "check_documents":
+            result = await document_service.check_required_documents(user_id, params.get("scheme_id"))
+            if result.get("all_available"):
+                return "All required documents are available."
+            return f"Missing documents: {', '.join(result.get('missing', []))}"
 
-    parts = [
-        "[FORM STATUS: A separate form-filling agent is filling the application form "
-        "in real-time based on this conversation. You do NOT fill the form yourself — "
-        "just have a natural conversation and ask the user for the information below.",
-    ]
-    if filled:
-        parts.append(f"Already filled: {', '.join(filled)}.")
-    parts.append(f"Still needed: {', '.join(missing)}.")
-    parts.append(
-        "Ask for 1-2 missing fields at a time in a conversational, friendly way. "
-        "Do NOT list all fields at once. The form agent will pick up the data automatically.]"
-    )
-    return " ".join(parts)
-
-
-def _strip_json_artifacts(text: str) -> str:
-    """Remove leaked JSON metadata from AI response text before sending to frontend."""
-    clean = text.strip()
-    # Remove trailing JSON object { ... }
-    depth = 0
-    json_start = -1
-    json_end = -1
-    for i in range(len(clean) - 1, -1, -1):
-        c = clean[i]
-        if c == '}':
-            if depth == 0:
-                json_end = i + 1
-            depth += 1
-        elif c == '{':
-            depth -= 1
-            if depth == 0:
-                json_start = i
-                break
-    if json_start > 0 and json_end > json_start:
-        before = clean[:json_start].strip()
-        if len(before) > 10:
-            clean = before
-    # Strip raw JSON key-value pairs that leak without braces
-    clean = re.sub(
-        r'["\']\s*(?:intent|detected_language|suggested_schemes|suggested_actions|requires_info)\s*["\']\s*:\s*[^,}\]]*[,]?\s*',
-        '', clean, flags=re.IGNORECASE
-    )
-    # Remove orphaned braces/brackets
-    clean = re.sub(r'[{}\[\]]\s*$', '', clean)
-    # Collapse blank lines
-    clean = re.sub(r'\n{3,}', '\n\n', clean)
-    return clean.strip()
-
-
-# Patterns that indicate the user wants to start filling a form
-_FORM_START_PATTERNS = re.compile(
-    r'(?:fill|filling|start|begin|open|launch)\s+(?:\w+\s+){0,4}(?:form|application|portal)|'
-    r'(?:form|application)\s+(?:\w+\s+){0,3}(?:fill|filling|start|begin|open)|'
-    r'(?:apply|register)\s*(?:now|for|online)|'
-    r'(?:i\s+want\s+to\s+(?:apply|fill))|'
-    r'(?:help\s+me\s+(?:fill|apply))|'
-    r'(?:start\s+(?:my\s+)?(?:application|filling))|'
-    r'(?:form\s+(?:bhar|bharo|shuru|bharein|bharna))|'  # Hindi
-    r'(?:(?:bhar|bharo|shuru)\s+(?:karo|kijiye|kare))|'  # Hindi verb forms
-    r'(?:form\s+nirappu|nirappu|nirapungal)|'  # Tamil
-    r'(?:apply\s+(?:cheyyi|cheyyandi))|'  # Telugu
-    r'(?:form\s+(?:puran|purun|pora|bharun))',  # Bengali/Marathi
-    re.IGNORECASE,
-)
-
-# Keyword sets for broad form-start detection
-_FORM_ACTION_WORDS = frozenset({
-    'fill', 'filling', 'start', 'begin', 'open', 'launch', 'apply',
-    'submit', 'complete', 'register', 'commence', 'initiate',
-    'bhar', 'bharo', 'shuru', 'nirappu', 'puran', 'pora',
-})
-_FORM_TARGET_WORDS = frozenset({
-    'form', 'application', 'portal', 'registration', 'enrollment',
-    'apply', 'register', 'scholarship', 'scheme',
-})
-
-
-def _should_start_form(user_text: str, ai_result, state: dict) -> tuple:
-    """Decide whether to auto-start the form agent.
-    Returns (should_start: bool, scheme_id: str)."""
-    scheme_id = state.get("scheme_id")
-
-    # Collect scheme from AI result
-    ai_schemes = []
-    ai_intent = ""
-    if isinstance(ai_result, dict):
-        ai_intent = ai_result.get("intent", "")
-        ai_schemes = ai_result.get("suggested_schemes", [])
-
-    # Helper: resolve the best scheme_id from all sources
-    def _resolve_scheme():
-        if ai_schemes:
-            return ai_schemes[0]
-        if scheme_id:
-            return scheme_id
-        # Try to extract scheme from conversation history
-        history = state.get("conversation_history", [])
-        for msg in reversed(history[-10:]):
-            content = msg.get("content", "").lower()
-            # Look for common scheme references in recent messages
-            for pattern in ["nsp", "scholarship", "pm-kisan", "ayushman", "pmjay",
-                            "nrega", "mgnrega", "vidyalakshmi", "pm-jay",
-                            "pension", "obc", "sc/st", "education"]:
-                if pattern in content:
-                    return pattern.replace("/", "_") + "_scheme"
-        return "generic_application"
-
-    # 1. AI returned application_start intent (with or without schemes)
-    if ai_intent in ("application_start", "application_help"):
-        return True, _resolve_scheme()
-
-    # 2. AI returned a matching scheme inquiry intent WITH specific schemes
-    if ai_schemes and ai_intent in ("scheme_inquiry", "eligibility_check"):
-        return True, ai_schemes[0]
-
-    # 3. User explicitly asked to fill a form (regex match)
-    if _FORM_START_PATTERNS.search(user_text):
-        return True, _resolve_scheme()
-
-    # 4. Broad keyword intersection — catches natural phrasing in any order
-    words = set(user_text.lower().split())
-    if words & _FORM_ACTION_WORDS and words & _FORM_TARGET_WORDS:
-        return True, _resolve_scheme()
-
-    # 5. Try to salvage intent from raw AI text (model sometimes leaks JSON metadata)
-    if isinstance(ai_result, dict):
-        raw_msg = str(ai_result.get("message", ""))
-        if '"application_start"' in raw_msg or '"application_help"' in raw_msg:
-            return True, _resolve_scheme()
-
-    return False, ""
-
-
-async def _start_form_agent(websocket: WebSocket, state: dict):
-    """Start the live form-filling agent."""
-    scheme_id = state.get("scheme_id")
-    if not scheme_id:
-        return
-
-    async def on_form_update(update: dict):
-        """Callback: send form updates to the client via WebSocket.
-        Also sends a transcript notification when OTP or CAPTCHA is needed."""
-        try:
-            await websocket.send_json(update)
-
-            # Notification for OTP / CAPTCHA — send as transcript for display
-            data = update.get("data", {})
-            status = data.get("status", "")
-            spoken_text = None
-            if status == "waiting_otp":
-                spoken_text = ("An OTP has been sent to your registered mobile number. "
-                               "Please check your phone and enter the OTP when you receive it.")
-            elif status == "waiting_captcha":
-                spoken_text = ("There is a CAPTCHA on the form that I cannot solve automatically. "
-                               "Please look at the screen and enter the CAPTCHA text.")
-
-            if spoken_text:
-                await websocket.send_json({
-                    "type": "transcript", "role": "assistant", "text": spoken_text,
-                })
-        except Exception:
-            pass
-
-    try:
-        form_session = await form_agent_service.start_session(
-            user_id=state["user_id"],
-            scheme_id=scheme_id,
-            user_data=state.get("user_profile"),
-            on_update=on_form_update,
-        )
-        state["form_session"] = form_session
-        logger.info(f"Form agent started: scheme={scheme_id}, session={form_session.session_id}")
-    except Exception as e:
-        logger.warning(f"Failed to start form agent: {e}")
-
-
-# ═══════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════
-
-async def _save_message(state: dict, role: str, text: str):
-    """Save a message to DynamoDB (background)."""
-    try:
-        user_id = state["user_id"]
-        conversation_id = state.get("conversation_id")
-        if not conversation_id:
-            return
-
-        message = {
-            "role": role,
-            "content": text,
-            "content_en": text,  # TODO: translate if needed
-            "timestamp": now_iso(),
-        }
-
-        conv = db.get_conversation(user_id, conversation_id)
-        if conv:
-            messages = conv.get("messages", [])
-            if isinstance(messages, str):
-                messages = json.loads(messages)
-            messages.append(message)
-            db.update_conversation(user_id, conversation_id, {
-                "messages": messages,
-                "language": state.get("language", "en"),
-            })
         else:
-            db.save_conversation({
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "messages": [message],
-                "language": state.get("language", "en"),
-                "created_at": now_iso(),
-            })
+            return f"Unknown tool: {tool}"
+
     except Exception as e:
-        logger.warning(f"Failed to save message: {e}")
-
-
-async def _cleanup_session(state: dict):
-    """Clean up all session resources."""
-    # Close form agent
-    form_session = state.get("form_session")
-    if form_session:
-        await form_agent_service.stop_session(form_session.session_id)
-        state["form_session"] = None
+        logger.error(f"[WS] Tool '{tool}' error: {e}")
+        return f"Error running {tool}: {str(e)}"

@@ -1,6 +1,6 @@
 4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-08
+> **Last updated:** 2026-03-08 (noVNC live browser, Claude Sonnet 4.6, SNS OTP)
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -36,10 +36,10 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 
 - **Voice AI Chat** — ElevenLabs Conversational AI (WebRTC) for natural speech interaction
 - **Scheme Discovery** — Search, match, and check eligibility for government schemes
-- **Live Form Filling** — Playwright browser automation fills real government portal forms
+- **Live Form Filling** — Playwright browser automation + noVNC live streaming (user watches real browser)
 - **Document Management** — Upload, OCR (Textract), classify (Bedrock), and auto-extract data
 - **Multi-language** — 22 Indian languages via AWS Translate
-- **Google OAuth + OTP Auth** — Cognito federation + phone OTP login
+- **Google OAuth + OTP Auth** — Cognito federation + phone OTP via AWS SNS
 
 ---
 
@@ -51,29 +51,30 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │  VoiceChat.jsx ─── useElevenLabsCall.js ─── ElevenLabs WebRTC│
 │       │                    │                                  │
 │       │              Backend WebSocket                        │
-│       └──── REST API ──────┤                                  │
+│  noVNC <iframe>  ──────────┤  (tool dispatch only)           │
+│  port 6080                 │                                  │
 └────────────────────────────┼──────────────────────────────────┘
                              │
 ┌────────────────────────────┼──────────────────────────────────┐
-│              Backend (FastAPI + uvicorn)                       │
+│       Docker Container (ECS Fargate, ap-south-1)              │
 │                            │                                  │
 │  ┌─── WS /ws/voice ───────┤                                  │
-│  │    ├─ text_message → AgentOrchestrator → Bedrock AI        │
-│  │    ├─ voice_transcript → FormAgent (field extraction only) │
-│  │    ├─ tool_call → _dispatch_tool() → service → tool_result │
-│  │    ├─ start_form → FormAgentService → Playwright           │
-│  │    └─ submit_otp / submit_captcha → live browser           │
+│  │    ├─ tool_call → _dispatch_tool() → service → tool_result│
+│  │    ├─ submit_otp/captcha → form_agent → live browser       │
+│  │    └─ voice_transcript / assistant_message → logged only   │
 │  │                                                            │
 │  ├─── REST /api/v1/* ─── auth, users, chat, docs, schemes, … │
 │  │                                                            │
 │  ├─── Services Layer                                          │
-│  │    ├─ bedrock_service    (Llama 3 70B via Converse API)    │
+│  │    ├─ bedrock_service    (Claude Sonnet 4.6 via Bedrock)   │
 │  │    ├─ scheme_service     (search, match, eligibility)      │
 │  │    ├─ document_service   (upload → OCR → classify → RAG)   │
-│  │    ├─ form_agent_service (Playwright live form filling)     │
+│  │    ├─ form_agent_service (Playwright HEADFUL on Xvfb :99)  │
 │  │    ├─ page_analyzer      (AI field discovery on portals)   │
-│  │    ├─ agent_orchestrator (multi-agent coordinator)          │
 │  │    └─ translate/s3/dynamodb/…                              │
+│  │                                                            │
+│  ├─── Xvfb :99 ──── x11vnc :5900 ──── noVNC :6080           │
+│  │    (virtual display)   (VNC)       (WebSocket iframe)      │
 │  │                                                            │
 │  └─── Data: DynamoDB tables + S3 buckets + local JSON seeds   │
 └───────────────────────────────────────────────────────────────┘
@@ -100,23 +101,22 @@ Civic Bridge/
 │   │   │   ├── digilocker.py          # DigiLocker OAuth flow
 │   │   │   └── ws.py                  # WS /ws/voice — real-time voice + form filling
 │   │   ├── services/
-│   │   │   ├── bedrock_service.py     # AWS Bedrock LLM (Llama 3 70B)
+│   │   │   ├── bedrock_service.py     # AWS Bedrock LLM (Claude Sonnet 4.6)
 │   │   │   ├── scheme_service.py      # Scheme discovery + eligibility engine
 │   │   │   ├── document_service.py    # Doc pipeline: S3 → Textract → Comprehend → Bedrock
-│   │   │   ├── form_agent_service.py  # Live Playwright form filling agent
+│   │   │   ├── form_agent_service.py  # Live Playwright HEADFUL form filling (noVNC display)
 │   │   │   ├── page_analyzer.py       # AI page understanding for govt portals
-│   │   │   ├── agent_orchestrator.py  # Multi-agent: Convo (instant) + Research/Form (bg)
+│   │   │   ├── agent_orchestrator.py  # Document agent wrapper (thin — ElevenLabs owns conversation)
 │   │   │   ├── translate_service.py   # AWS Translate
 │   │   │   ├── dynamodb_service.py    # All DynamoDB CRUD
 │   │   │   ├── s3_service.py          # S3 file operations
 │   │   │   ├── web_search_service.py  # DuckDuckGo scheme search
-│   │   │   ├── auth_service.py        # OTP + JWT + Google OAuth
+│   │   │   ├── auth_service.py        # OTP (AWS SNS) + JWT + Google OAuth
 │   │   │   ├── cognito_service.py     # AWS Cognito user pools
 │   │   │   ├── comprehend_service.py  # AWS Comprehend NLP (NER, sentiment)
 │   │   │   ├── textract_service.py    # AWS Textract OCR
 │   │   │   ├── tracking_service.py    # Application status monitoring
 │   │   │   ├── notification_service.py # SMS/WhatsApp notifications
-│   │   │   ├── automation_service.py  # Headless browser automation (legacy)
 │   │   │   └── aws_clients.py         # Shared boto3 client initialization
 │   │   ├── models/                    # Pydantic schemas (user, document, scheme, etc.)
 │   │   ├── utils/
@@ -131,7 +131,10 @@ Civic Bridge/
 │   │   └── schemes_welfare.json
 │   ├── requirements.txt
 │   ├── .env / .env.example
-│   └── lambda_handler.py             # AWS Lambda entry (mangum)
+│   ├── Dockerfile                    # Docker: Xvfb + x11vnc + noVNC + FastAPI
+│   └── docker/
+│       ├── start.sh                  # Container entrypoint
+│       └── supervisord.conf          # Process supervisor config
 │
 ├── frontend/
 │   ├── src/

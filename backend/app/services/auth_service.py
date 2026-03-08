@@ -1,6 +1,7 @@
 """
 Auth Service - OTP Generation, Verification, JWT Token Management
-Uses Twilio SMS + AWS SES for OTP delivery. Google OAuth support.
+Uses AWS SNS for SMS OTP delivery + AWS SES for email. Google OAuth support.
+Twilio removed -- OTP now sent via boto3 SNS.
 """
 import logging
 from typing import Optional, Dict, Tuple
@@ -17,26 +18,25 @@ _dev_otp_store: Dict[str, str] = {}
 # Track verified phone numbers (for registration flow)
 _verified_phones: Dict[str, str] = {}  # phone -> timestamp
 
-# Twilio client (lazy init)
-_twilio_client = None
+# SNS client (lazy init)
+_sns_client = None
 
 # SES client (lazy init)
 _ses_client = None
 
 
-def _get_twilio():
-    """Lazy Twilio client initialization"""
-    global _twilio_client
-    if _twilio_client is not None:
-        return _twilio_client
-    if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
-        try:
-            from twilio.rest import Client
-            _twilio_client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-            logger.info("Twilio SMS client initialized")
-            return _twilio_client
-        except Exception as e:
-            logger.error(f"Failed to init Twilio client: {e}")
+def _get_sns():
+    """Lazy AWS SNS client initialization"""
+    global _sns_client
+    if _sns_client is not None:
+        return _sns_client
+    try:
+        import boto3
+        _sns_client = boto3.client("sns", region_name=settings.AWS_REGION)
+        logger.info("AWS SNS client initialized")
+        return _sns_client
+    except Exception as e:
+        logger.error(f"Failed to init SNS client: {e}")
     return None
 
 
@@ -59,7 +59,7 @@ class AuthService:
     """Handles authentication flow: Phone+Email OTP → JWT Token"""
     
     def send_otp(self, phone_number: str, email: str = None) -> Dict:
-        """Generate OTP and send via Twilio SMS + SES Email"""
+        """Generate OTP and send via AWS SNS SMS + SES Email"""
         otp = generate_otp()
         
         # Store OTP in DynamoDB (or dev store)
@@ -69,21 +69,30 @@ class AuthService:
             logger.warning(f"DynamoDB not available, using dev OTP store: {e}")
             _dev_otp_store[phone_number] = otp
         
-        # Send OTP via Twilio SMS
-        twilio = _get_twilio()
-        if twilio and settings.TWILIO_PHONE_NUMBER:
+        # Send OTP via AWS SNS SMS
+        sns = _get_sns()
+        if sns:
             try:
-                message = twilio.messages.create(
-                    body=f"Your CivicBridge verification code is: {otp}. Valid for 5 minutes.",
-                    from_=settings.TWILIO_PHONE_NUMBER,
-                    to=f"+91{phone_number}"
+                sns.publish(
+                    PhoneNumber=f"+91{phone_number}",
+                    Message=f"Your CivicBridge verification code is: {otp}. Valid for 5 minutes.",
+                    MessageAttributes={
+                        "AWS.SNS.SMS.SenderID": {
+                            "DataType": "String",
+                            "StringValue": getattr(settings, 'SNS_SENDER_ID', 'CivicBridge'),
+                        },
+                        "AWS.SNS.SMS.SMSType": {
+                            "DataType": "String",
+                            "StringValue": "Transactional",
+                        },
+                    },
                 )
-                logger.info(f"OTP sent to {phone_number} via Twilio SMS (SID: {message.sid})")
+                logger.info(f"OTP sent to {phone_number} via AWS SNS")
             except Exception as e:
-                logger.error(f"Twilio SMS failed: {e}")
+                logger.error(f"AWS SNS SMS failed: {e}")
                 logger.info(f"DEV MODE - OTP for {phone_number}: {otp}")
         else:
-            logger.info(f"DEV MODE - OTP for {phone_number}: {otp} (Twilio not configured)")
+            logger.info(f"DEV MODE - OTP for {phone_number}: {otp} (SNS not configured)")
         
         # Send OTP via Email (SES)
         if email:
