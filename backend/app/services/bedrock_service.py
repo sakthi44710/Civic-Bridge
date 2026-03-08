@@ -115,8 +115,75 @@ class BedrockService:
 
     def __init__(self):
         self.client = aws.bedrock_runtime()
-        self.chat_model = settings.BEDROCK_MODEL_ID       # Claude Sonnet 4.6 - fast
-        self.smart_model = settings.BEDROCK_SMART_MODEL    # Llama 3 70B - deep
+        self.chat_model = settings.BEDROCK_MODEL_ID       # Claude Haiku 4.5 - fast
+        self.smart_model = settings.BEDROCK_SMART_MODEL    # Claude Haiku 4.5 - deep
+
+    # ============================================================
+    # converse_raw — used by the voice pipeline (tool_use support)
+    # Supports both boto3 SigV4 and Bearer-token API-key auth.
+    # ============================================================
+
+    def converse_raw(
+        self,
+        model_id: str,
+        messages: list,
+        system: str = "",
+        tools: list = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+    ) -> dict:
+        """Call Bedrock Converse API and return the raw response dict.
+
+        Messages must already be in Converse API format:
+            [{"role": "user", "content": [{"text": "..."}]}, ...]
+
+        Tool-use blocks and toolResult blocks are also accepted as-is.
+
+        Returns the full response dict (stopReason, output.message.content, usage).
+        Uses Bearer-token auth if BEDROCK_API_KEY is set, otherwise falls back
+        to boto3 SigV4.
+        """
+        body: dict = {
+            "messages": messages,
+            "inferenceConfig": {
+                "maxTokens": max_tokens,
+                "temperature": temperature,
+            },
+        }
+        if system:
+            body["system"] = [{"text": system}]
+        if tools:
+            body["toolConfig"] = {"tools": tools}
+
+        if settings.BEDROCK_API_KEY:
+            # ---- Direct HTTPS with Bearer token ----
+            import urllib.parse
+            region = settings.BEDROCK_API_REGION
+            encoded_model = urllib.parse.quote(model_id, safe="")
+            url = (
+                f"https://bedrock-runtime.{region}.amazonaws.com"
+                f"/model/{encoded_model}/converse"
+            )
+            try:
+                import httpx as _httpx
+                resp = _httpx.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {settings.BEDROCK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                    timeout=60.0,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                logger.error(f"[Bedrock API-key] {e} — falling back to boto3")
+                # Fall through to boto3 path
+
+        # ---- boto3 SigV4 ----
+        boto_kwargs = {"modelId": model_id, **body}
+        return self.client.converse(**boto_kwargs)
 
     # ============================================================
     # Core invoke via Converse API (universal, works with all models)

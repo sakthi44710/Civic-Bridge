@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@elevenlabs/react": "^0.14.1",
     "@splinetool/react-spline": "^4.1.0",
     "@splinetool/runtime": "^1.12.61",
     "axios": "^1.6.0",

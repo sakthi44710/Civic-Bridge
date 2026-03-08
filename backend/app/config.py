@@ -29,16 +29,25 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI Services - Llama 3 70B (via Converse API)
-    BEDROCK_MODEL_ID: str = "anthropic.claude-sonnet-4-6"   # Fast chat + general tasks
-    BEDROCK_SMART_MODEL: str = "anthropic.claude-sonnet-4-6"  # Deep analysis + eligibility
+    # AI Services - Claude Haiku 4.5 (voice) via Bedrock Converse API
+    BEDROCK_MODEL_ID: str = "anthropic.claude-haiku-4-5"     # Voice + general tasks
+    BEDROCK_SMART_MODEL: str = "anthropic.claude-haiku-4-5"   # Deep analysis + eligibility
+    # Bedrock API key (Bearer token auth) — alternative to IAM SigV4
+    BEDROCK_API_KEY: str = ""            # ABSK... key from AWS Bedrock console
+    BEDROCK_API_REGION: str = "us-east-1" # Region where API key is scoped
     
     # JWT Settings
     JWT_SECRET: str = "your-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 24
     
-    # Twilio SMS
+    # Sarvam AI — Indian language STT + TTS
+    SARVAM_API_KEY: str = ""             # From sarvam.ai dashboard
+
+    # AWS SNS — OTP SMS delivery
+    SNS_SENDER_ID: str = "CivicBridge"
+
+    # Legacy Twilio (unused — kept for backwards compat with old .env files)
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""

@@ -1,140 +1,203 @@
-﻿// useElevenLabsCall.js
+﻿// useElevenLabsCall.js  (file kept as-is for import compatibility)
 //
-// Manages two connections simultaneously:
-//   1. ElevenLabs WebRTC -- voice in/out via @elevenlabs/react
-//   2. Backend WebSocket -- tool dispatch and form events
+// Voice pipeline — Sarvam AI + Claude Haiku 4.5 (replaces ElevenLabs)
 //
-// ElevenLabs is the MAIN AGENT (Claude Haiku 4.5).
-// It calls 11 backend tools. Backend executes and returns string results.
-// ElevenLabs speaks the results back to the user.
+// Architecture:
+//   Frontend  → MediaRecorder (WebM/Opus) → WebSocket binary frame
+//   Backend    Sarvam STT → Claude Haiku 4.5 (tool_use) → Sarvam TTS
+//   Frontend  ← audio_response (base64 WAV) ← WebSocket
 //
-// noVNC visual stream is a separate iframe -- this hook does NOT handle screenshots.
-// This hook only manages: tool dispatch, form events, OTP/CAPTCHA relay, transcript.
+// Push-to-talk:  call startRecording() / stopRecording()
+// Text input:    call sendTextMessage(text)
+// Form:          OTP/CAPTCHA/form state managed here, exposed to VoiceChat
 
 import { useRef, useState, useCallback, useEffect } from "react";
-import { useConversation } from "@elevenlabs/react";
 
-const AGENT_ID    = import.meta.env.VITE_ELEVENLABS_AGENT_ID;
 const WS_BASE     = import.meta.env.VITE_WS_URL || "ws://localhost:8000";
 const WS_ENDPOINT = `${WS_BASE}/api/v1/ws/voice`;
 
 export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormStopped, onTranscript }) {
-  const [inCall, setInCall]   = useState(false);
-  const [status, setStatus]   = useState("idle");
-  const wsRef                 = useRef(null);
-  const pendingToolCalls      = useRef({});
-  const isCallActiveRef       = useRef(false);
+  const [inCall, setInCall]           = useState(false);
+  const [status, setStatus]           = useState("idle");
+  const [isRecording, setIsRecording] = useState(false);
 
-  // Connect to backend WebSocket
-  const connectBackendWS = useCallback(() => {
+  const wsRef          = useRef(null);
+  const mediaRecRef    = useRef(null);
+  const streamRef      = useRef(null);
+  const audioCtxRef    = useRef(null);
+  const isActiveRef    = useRef(false);
+
+  // ------------------------------------------------------------------
+  // WebSocket connection + message handler
+  // ------------------------------------------------------------------
+  const connectWS = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const ws = new WebSocket(`${WS_ENDPOINT}?token=${token}`);
+    ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "session_start", language: "en" }));
+      ws.send(JSON.stringify({ type: "session_start", language: "en-IN" }));
+      setStatus("listening");
     };
 
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-
-      switch (msg.type) {
-        case "tool_result": {
-          const pending = pendingToolCalls.current[msg.call_id];
-          if (pending) {
-            clearTimeout(pending.timer);
-            pending.resolve(msg.result);
-            delete pendingToolCalls.current[msg.call_id];
-          }
-          break;
-        }
-        case "form_started":
-          onFormStarted?.();
-          break;
-        case "form_stopped":
-          onFormStopped?.();
-          break;
-        case "form_update":
-          onFormUpdate?.(msg.data);
-          break;
-        default:
-          break;
+      // Binary frames are not sent from server — all server messages are JSON
+      if (!(event.data instanceof ArrayBuffer)) {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+        _handleServerMessage(msg);
       }
     };
 
     ws.onerror = (err) => console.error("[WS] Error:", err);
     ws.onclose = () => {
-      if (isCallActiveRef.current) setTimeout(connectBackendWS, 3000);
+      if (isActiveRef.current) setTimeout(connectWS, 3000);
     };
-  }, [token, onFormUpdate, onFormStarted, onFormStopped]);
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Send a tool_call to backend, return a Promise that resolves with the result string
-  const callBackendTool = useCallback((toolName, params) => {
-    return new Promise((resolve, reject) => {
-      const callId = `${toolName}_${Date.now()}`;
-      const timer  = setTimeout(() => {
-        delete pendingToolCalls.current[callId];
-        reject(new Error(`Tool '${toolName}' timed out`));
-      }, 15000);
+  const _handleServerMessage = useCallback((msg) => {
+    switch (msg.type) {
+      case "status":
+        setStatus(msg.status);
+        break;
 
-      pendingToolCalls.current[callId] = { resolve, reject, timer };
-      wsRef.current?.send(JSON.stringify({ type: "tool_call", call_id: callId, tool: toolName, params }));
-    });
-  }, []);
+      case "transcript":
+        onTranscript?.({ role: msg.role, text: msg.text });
+        break;
 
-  // 11 client tools registered with ElevenLabs agent
-  // Each is async (params) => string
-  // ElevenLabs calls these when it decides an action is needed
-  const clientTools = {
-    search_schemes:     (p) => callBackendTool("search_schemes", p),
-    match_schemes:      (p) => callBackendTool("match_schemes", p),
-    check_eligibility:  (p) => callBackendTool("check_eligibility", p),
-    start_form_filling: (p) => callBackendTool("start_form_filling", p),
-    get_form_status:    (p) => callBackendTool("get_form_status", p),
-    get_missing_fields: (p) => callBackendTool("get_missing_fields", p),
-    provide_field_data: (p) => callBackendTool("provide_field_data", p),
-    stop_form_filling:  (p) => callBackendTool("stop_form_filling", p),
-    get_user_profile:   (p) => callBackendTool("get_user_profile", p),
-    get_user_documents: (p) => callBackendTool("get_user_documents", p),
-    check_documents:    (p) => callBackendTool("check_documents", p),
+      case "audio_response":
+        _playAudio(msg.data);
+        break;
+
+      case "form_started":
+        onFormStarted?.();
+        break;
+
+      case "form_stopped":
+        onFormStopped?.();
+        break;
+
+      case "form_update":
+        onFormUpdate?.(msg.data);
+        break;
+
+      case "error":
+        console.error("[WS server error]", msg.message);
+        break;
+
+      default:
+        break;
+    }
+  }, [onFormUpdate, onFormStarted, onFormStopped, onTranscript]);
+
+  // ------------------------------------------------------------------
+  // Audio playback — play base64 WAV received from Sarvam TTS
+  // ------------------------------------------------------------------
+  const _playAudio = (base64wav) => {
+    try {
+      const audio = new Audio(`data:audio/wav;base64,${base64wav}`);
+      audio.onended = () => setStatus("listening");
+      audio.play().catch((e) => console.warn("[Audio play]", e));
+    } catch (e) {
+      console.warn("[Audio decode]", e);
+    }
   };
 
-  const conversation = useConversation({
-    onConnect: () => { setStatus("listening"); connectBackendWS(); },
-    onDisconnect: () => {
-      setStatus("idle");
-      setInCall(false);
-      isCallActiveRef.current = false;
-      wsRef.current?.send(JSON.stringify({ type: "session_end" }));
-    },
-    onMessage: ({ message, source }) => {
-      onTranscript?.({ role: source, text: message });
-      if (source === "user") {
-        wsRef.current?.send(JSON.stringify({ type: "voice_transcript", data: message }));
-      } else if (source === "ai") {
-        wsRef.current?.send(JSON.stringify({ type: "assistant_message", data: message }));
-      }
-    },
-    onError: (err) => console.error("[ElevenLabs]", err),
-    clientTools,
-  });
+  // ------------------------------------------------------------------
+  // Push-to-talk recording
+  // ------------------------------------------------------------------
+  const startRecording = useCallback(async () => {
+    if (isRecording || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      streamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecRef.current = recorder;
+      const chunks = [];
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+
+        const blob = new Blob(chunks, { type: mimeType });
+        // Send as binary WebSocket frame for efficiency
+        try {
+          const arrayBuffer = await blob.arrayBuffer();
+          if (wsRef.current?.readyState === WebSocket.OPEN && arrayBuffer.byteLength > 1000) {
+            wsRef.current.send(arrayBuffer);
+          }
+        } catch (e) {
+          console.warn("[Recording send]", e);
+        }
+        setIsRecording(false);
+        setStatus("processing");
+      };
+
+      recorder.start();
+      setIsRecording(true);
+      setStatus("recording");
+    } catch (e) {
+      console.error("[Mic]", e);
+      setStatus("listening");
+    }
+  }, [isRecording]);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecRef.current?.state === "recording") {
+      mediaRecRef.current.stop();
+    }
+  }, []);
+
+  // Toggle recording: click once to start, click again to stop
+  const toggleRecording = useCallback(() => {
+    if (isRecording) stopRecording();
+    else startRecording();
+  }, [isRecording, startRecording, stopRecording]);
+
+  // ------------------------------------------------------------------
+  // Text message
+  // ------------------------------------------------------------------
+  const sendTextMessage = useCallback((text) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "text_message", data: text }));
+      setStatus("processing");
+    }
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Session start / end
+  // ------------------------------------------------------------------
   const startCall = useCallback(async () => {
     setInCall(true);
     setStatus("connecting");
-    isCallActiveRef.current = true;
-    await conversation.startSession({ agentId: AGENT_ID });
-  }, [conversation]);
+    isActiveRef.current = true;
+    connectWS();
+  }, [connectWS]);
 
-  const endCall = useCallback(async () => {
-    isCallActiveRef.current = false;
-    await conversation.endSession();
+  const endCall = useCallback(() => {
+    isActiveRef.current = false;
+    stopRecording();
+    wsRef.current?.send(JSON.stringify({ type: "session_end" }));
+    wsRef.current?.close();
+    wsRef.current = null;
     setInCall(false);
     setStatus("idle");
-    wsRef.current?.close();
-  }, [conversation]);
+    setIsRecording(false);
+  }, [stopRecording]);
 
+  // ------------------------------------------------------------------
+  // OTP / CAPTCHA relay
+  // ------------------------------------------------------------------
   const submitOtp = useCallback((otp) => {
     wsRef.current?.send(JSON.stringify({ type: "submit_otp", otp }));
   }, []);
@@ -143,7 +206,14 @@ export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormSt
     wsRef.current?.send(JSON.stringify({ type: "submit_captcha", text }));
   }, []);
 
-  useEffect(() => () => wsRef.current?.close(), []);
+  // ------------------------------------------------------------------
+  useEffect(() => () => { wsRef.current?.close(); streamRef.current?.getTracks().forEach(t => t.stop()); }, []);
 
-  return { inCall, status: conversation.status || status, startCall, endCall, submitOtp, submitCaptcha };
+  return {
+    inCall, status, isRecording,
+    startCall, endCall,
+    toggleRecording, startRecording, stopRecording,
+    sendTextMessage,
+    submitOtp, submitCaptcha,
+  };
 }

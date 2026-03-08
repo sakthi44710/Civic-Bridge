@@ -1,6 +1,6 @@
 4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-08 (noVNC live browser, Claude Sonnet 4.6, SNS OTP)
+> **Last updated:** 2026-03-08 (Sarvam AI STT/TTS + Claude Haiku 4.5, noVNC live browser, SNS OTP)
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -34,11 +34,12 @@ npm run dev                   # Vite dev server on port 5173
 
 CivicBridge is an AI-powered platform helping Indian citizens discover and apply for government welfare schemes through voice-first, multilingual interactions. Key capabilities:
 
-- **Voice AI Chat** — ElevenLabs Conversational AI (WebRTC) for natural speech interaction
+- **Voice AI Chat** — Sarvam AI (saarika:v2 STT + bulbul:v2 TTS) + Claude Haiku 4.5 (Bedrock) for full voice pipeline
+- **Auto Language Detection** — Sarvam STT detects spoken language; AI responds and speaks back in the same language
 - **Scheme Discovery** — Search, match, and check eligibility for government schemes
 - **Live Form Filling** — Playwright browser automation + noVNC live streaming (user watches real browser)
 - **Document Management** — Upload, OCR (Textract), classify (Bedrock), and auto-extract data
-- **Multi-language** — 22 Indian languages via AWS Translate
+- **Multi-language** — 22 Indian languages via Sarvam AI + AWS Translate
 - **Google OAuth + OTP Auth** — Cognito federation + phone OTP via AWS SNS
 
 ---
@@ -48,30 +49,34 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Frontend (React + Vite)                   │
-│  VoiceChat.jsx ─── useElevenLabsCall.js ─── ElevenLabs WebRTC│
-│       │                    │                                  │
-│       │              Backend WebSocket                        │
-│  noVNC <iframe>  ──────────┤  (tool dispatch only)           │
-│  port 6080                 │                                  │
+│  VoiceChat.jsx ─── useElevenLabsCall.js ─── Sarvam AI (STT+TTS)│
+│       │                    │                                      │
+│       │              Backend WebSocket  ← audio binary frames     │
+│  noVNC <iframe>  ──────────┤  (full voice pipeline)              │
+│  port 6080                 │                                      │
 └────────────────────────────┼──────────────────────────────────┘
                              │
 ┌────────────────────────────┼──────────────────────────────────┐
 │       Docker Container (ECS Fargate, ap-south-1)              │
 │                            │                                  │
-│  ┌─── WS /ws/voice ───────┤                                  │
-│  │    ├─ tool_call → _dispatch_tool() → service → tool_result│
-│  │    ├─ submit_otp/captcha → form_agent → live browser       │
-│  │    └─ voice_transcript / assistant_message → logged only   │
+│  ┌─── WS /ws/voice ───────┤                                        │
+│  │    ├─ audio binary → Sarvam STT → language detect              │
+│  │    ├─ text → Claude Haiku 4.5 (Bedrock, tool_use loop)         │
+│  │    ├─ tool_use → _execute_tool() → service → back to Claude    │
+│  │    ├─ Claude response → Sarvam TTS → audio_response            │
+│  │    ├─ submit_otp/captcha → form_agent → live browser           │
+│  │    └─ form_update → noVNC iframe side-channel                  │
 │  │                                                            │
 │  ├─── REST /api/v1/* ─── auth, users, chat, docs, schemes, … │
 │  │                                                            │
-│  ├─── Services Layer                                          │
-│  │    ├─ bedrock_service    (Claude Sonnet 4.6 via Bedrock)   │
-│  │    ├─ scheme_service     (search, match, eligibility)      │
-│  │    ├─ document_service   (upload → OCR → classify → RAG)   │
-│  │    ├─ form_agent_service (Playwright HEADFUL on Xvfb :99)  │
-│  │    ├─ page_analyzer      (AI field discovery on portals)   │
-│  │    └─ translate/s3/dynamodb/…                              │
+│  ├─── Services Layer                                              │
+│  │    ├─ sarvam_service     (Sarvam AI STT saarika:v2 + TTS bulbul:v2) │
+│  │    ├─ bedrock_service    (Claude Haiku 4.5 via Bedrock)        │
+│  │    ├─ scheme_service     (search, match, eligibility)          │
+│  │    ├─ document_service   (upload → OCR → classify → RAG)      │
+│  │    ├─ form_agent_service (Playwright HEADFUL on Xvfb :99)      │
+│  │    ├─ page_analyzer      (AI field discovery on portals)       │
+│  │    └─ translate/s3/dynamodb/…                                  │
 │  │                                                            │
 │  ├─── Xvfb :99 ──── x11vnc :5900 ──── noVNC :6080           │
 │  │    (virtual display)   (VNC)       (WebSocket iframe)      │
@@ -101,12 +106,13 @@ Civic Bridge/
 │   │   │   ├── digilocker.py          # DigiLocker OAuth flow
 │   │   │   └── ws.py                  # WS /ws/voice — real-time voice + form filling
 │   │   ├── services/
-│   │   │   ├── bedrock_service.py     # AWS Bedrock LLM (Claude Sonnet 4.6)
+│   │   │   ├── sarvam_service.py      # Sarvam AI: STT saarika:v2 + TTS bulbul:v2
+│   │   │   ├── bedrock_service.py     # Claude Haiku 4.5 via Bedrock (converse_raw + tool_use)
 │   │   │   ├── scheme_service.py      # Scheme discovery + eligibility engine
 │   │   │   ├── document_service.py    # Doc pipeline: S3 → Textract → Comprehend → Bedrock
 │   │   │   ├── form_agent_service.py  # Live Playwright HEADFUL form filling (noVNC display)
 │   │   │   ├── page_analyzer.py       # AI page understanding for govt portals
-│   │   │   ├── agent_orchestrator.py  # Document agent wrapper (thin — ElevenLabs owns conversation)
+│   │   │   ├── agent_orchestrator.py  # Document agent wrapper (thin)
 │   │   │   ├── translate_service.py   # AWS Translate
 │   │   │   ├── dynamodb_service.py    # All DynamoDB CRUD
 │   │   │   ├── s3_service.py          # S3 file operations
@@ -261,27 +267,29 @@ All routes prefixed with `/api/v1`.
 ### Client → Server Messages
 
 | type | Fields | Purpose |
-|------|--------|---------|
-| `session_start` | `language`, `conversation_id?`, `scheme_id?` | Init session, load profile |
-| `text_message` | `data` (string) | Text input → orchestrator → AI |
-| `voice_transcript` | `data` (string) | ElevenLabs user transcript → form agent only (no backend AI) |
-| `assistant_message` | `data` (string) | ElevenLabs AI response → form agent context |
-| `tool_call` | `call_id`, `tool`, `params` | Client tool dispatch from ElevenLabs agent |
-| `start_form` | `scheme_id` | Explicitly start form filling session |
+|------|--------|------|
+| `session_start` | `language`, `conversation_id?` | Init session, load profile |
+| `audio_message` | `data` (base64 WebM) | Voice input (JSON variant of binary frame) |
+| `text_message` | `data` (string) | Typed text input → Claude → TTS |
 | `submit_otp` | `otp` | Relay OTP to live browser |
 | `submit_captcha` | `text` | Relay CAPTCHA answer to live browser |
 | `session_end` | — | End session, cleanup |
+
+> **Binary frames**: Raw WebM/Opus audio sent as WebSocket binary frames is the preferred path (no JSON wrapping).
 
 ### Server → Client Messages
 
 | type | Fields | Purpose |
 |------|--------|---------|
-| `session_started` | `conversation_id`, `form_session?` | Confirms init |
-| `transcript` | `role`, `text` | User or assistant transcript |
-| `status` | `status` | listening / processing / idle |
-| `form_update` | `data` (see below) | Live form progress + screenshot |
-| `form_started` | `scheme_id`, `session_id` | Form session confirmed |
-| `tool_result` | `call_id`, `result` | Response to tool_call |
+| `session_started` | `conversation_id`, `novnc_ready` | Confirms init |
+| `transcript` | `role`, `text`, `language` | User or assistant transcript |
+| `audio_response` | `data` (base64 WAV), `transcript`, `language` | Sarvam TTS audio to play |
+| `status` | `status` | listening / recording / processing / speaking |
+| `form_update` | `data` (see below) | Live form progress |
+| `form_started` | `scheme_id`, `session_id`, `show_novnc` | Form session confirmed |
+| `form_stopped` | — | Form session ended |
+| `otp_accepted` | `success` | OTP relay result |
+| `captcha_accepted` | `success` | CAPTCHA relay result |
 | `error` | `message` | Error |
 
 ### `form_update` data shape
@@ -308,22 +316,22 @@ All routes prefixed with `/api/v1`.
 
 ---
 
-## ElevenLabs Client Tools (11 tools)
+## Claude Haiku 4.5 Tools (11 tools)
 
-The ElevenLabs voice agent triggers backend actions via client tools.
-**Flow:** Agent calls tool → `useElevenLabsCall.js` sends `tool_call` WS → backend `_dispatch_tool()` → returns `tool_result` → agent speaks result.
+Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
+**Flow:** User speaks → Sarvam STT → Claude with tool definitions → tool_use → `_execute_tool()` in ws.py → result back to Claude → TTS → audio to user.
 
 | Tool | Params | Backend Service | Purpose |
 |------|--------|----------------|---------|
 | `search_schemes` | `query`, `category` | `scheme_service.search_schemes()` | Search schemes by keyword/category |
 | `match_schemes` | — | `scheme_service.match_schemes(profile)` | Auto-match eligible schemes from profile |
 | `check_eligibility` | `scheme_id` | `scheme_service.check_eligibility()` | Check eligibility for specific scheme |
-| `start_form_filling` | `scheme_id` | `_start_form_agent()` + doc auto-fill | Launch Playwright form filling |
+| `start_form_filling` | `scheme_id` | `form_agent_service.start_session()` + doc auto-fill | Launch Playwright form filling |
 | `get_form_status` | — | `session.get_filled_fields()` etc. | Current form progress |
 | `get_missing_fields` | — | `session.get_missing_fields()` | Which fields still need data |
-| `provide_field_data` | `field_name`, `value` | `session.collected_fields` + browser fill | Inject field value |
-| `stop_form_filling` | — | `session.close()` | Stop form session |
-| `get_user_profile` | — | `state["user_profile"]` | User profile summary |
+| `provide_field_data` | `field_name`, `value` | `form_agent_service.provide_field()` | Inject field value |
+| `stop_form_filling` | — | `form_agent_service.close_session()` | Stop form session |
+| `get_user_profile` | — | `session_state["user_profile"]` | User profile summary |
 | `get_user_documents` | — | `document_service.get_user_documents()` | List uploaded docs |
 | `check_documents` | `scheme_id` | `document_service.check_required_documents()` | Check missing docs for scheme |
 
@@ -331,10 +339,23 @@ The ElevenLabs voice agent triggers backend actions via client tools.
 
 ## Backend Services Reference
 
+### SarvamService (`sarvam_service.py`)
+- **Purpose:** Sarvam AI Indian-language STT + TTS — replaces ElevenLabs voice pipeline
+- **STT model:** `saarika:v2` — transcribes audio and **auto-detects language** (returns BCP-47 code)
+- **TTS model:** `bulbul:v2` — speaks back in the detected/requested language, auto-selects speaker per language
+- **Auth:** `api-subscription-key` header
+- **Key methods:**
+  - `async speech_to_text(audio_bytes, hint_language?)` → `{text, language_code, detected_language}`
+  - `async text_to_speech(text, language)` → raw WAV bytes (22050 Hz 16-bit mono)
+- **Speaker map:** hi-IN→meera, ta-IN→pavithra, te-IN→arvind, kn-IN→pavithra, bn-IN→amartya, mr-IN→aarohi, en-IN→meera
+- **Singleton:** `sarvam_service`
+
 ### BedrockService (`bedrock_service.py`)
-- **Purpose:** AWS Bedrock LLM gateway — Llama 3 70B via Converse API
-- **Model:** `meta.llama3-70b-instruct-v1:0` (configurable in .env)
-- **Key methods:** `chat()`, `chat_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`, `generate_form_summary()`, `analyze_screenshot()`
+- **Purpose:** AWS Bedrock LLM gateway — Claude Haiku 4.5 via Converse API
+- **Model:** `anthropic.claude-haiku-4-5` (configurable in .env)
+- **Auth:** SigV4 (boto3) OR Bearer token if `BEDROCK_API_KEY` is set (httpx)
+- **Key methods:** `chat()`, `chat_raw()`, `converse_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`
+- **`converse_raw(model_id, messages, system, tools, max_tokens, temperature)`** — returns raw Converse API dict (stopReason, output.message.content). Used by ws.py for tool_use loop.
 
 ### SchemeService (`scheme_service.py`)
 - **Singleton:** `scheme_service`
@@ -517,28 +538,36 @@ b5b1a84 Voice-driven form filling: background agent, live projection, AI field p
 - **Error handling:** Services return dicts with error fields (not exceptions) for graceful degradation. WS sends `{"type": "error", "message": ...}` on failures.
 
 ### Frontend
-- **Hook pattern:** `useElevenLabsCall` manages both ElevenLabs (voice) and backend WS (actions). Returns `startCall`, `endCall`, `sendTextMessage`, etc.
-- **Client tools:** Each tool is `async (params) => string`. Sends WS tool_call, waits for tool_result (15s timeout), returns result string for agent to speak.
-- **Form updates:** `onFormUpdate` callback receives `form_update.data` → VoiceChat.jsx updates `formInfo` + `formScreenshot` state.
+- **Hook pattern:** `useElevenLabsCall` (file kept for import compat) manages push-to-talk MediaRecorder + backend WS. Returns `startCall`, `endCall`, `toggleRecording`, `sendTextMessage`, etc.
+- **Push-to-talk:** `startRecording()` → MediaRecorder captures WebM/Opus → `stopRecording()` → binary WS frame → backend STT.
+- **Audio playback:** Backend sends `audio_response` with base64 WAV → `new Audio("data:audio/wav;base64,...").play()`.
+- **Form updates:** `onFormUpdate` callback receives `form_update.data` → VoiceChat.jsx updates `formInfo` + shows noVNC iframe.
 
 ### Data Flow (Voice Chat)
 ```
-User speaks → ElevenLabs agent (STT + AI reasoning + TTS) → speaks back
-                     ↓ client tool call (if action needed)
-              useElevenLabsCall.js → WS tool_call → backend _dispatch_tool()
-                     ↓                                    ↓
-              WS tool_result ← ─────────────────── service result (string)
+User speaks → MediaRecorder (WebM) → WS binary frame
                      ↓
-              Agent receives string → speaks result to user
+              ws.py: Sarvam STT → detected language
+                     ↓
+              Claude Haiku 4.5 (tool_use loop)
+                     ↓ if tool needed
+              _execute_tool() → service → result string → back to Claude
+                     ↓
+              Claude final response text
+                     ↓
+              Sarvam TTS (in detected language) → WAV bytes
+                     ↓
+              WS audio_response (base64 WAV) → frontend plays audio
 ```
 
 ### Data Flow (Form Filling)
 ```
-User speaks field data → ElevenLabs → voice_transcript → FormFillingSession
+User: "Fill the PM Kisan form" → Claude tool_use: start_form_filling
                                                               ↓
-                                   AI extraction (Bedrock) → collected_fields updated
+                                   FormAgentService.start_session()
                                                               ↓
-                                   Playwright fills field in browser (char-by-char, cyan highlight)
+                                   Playwright fills browser (char-by-char)
                                                               ↓
-                                   CDP screencast frame → WS form_update → frontend live viewport
+                                   noVNC → user watches live in iframe
+                                   WS form_update → progress bar
 ```
