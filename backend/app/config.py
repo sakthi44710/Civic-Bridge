@@ -29,10 +29,11 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI — Claude Haiku 4.5 via Bedrock (replaces Llama 3 70B for ALL tasks)
+    # AI — Claude Sonnet 4.5 via Bedrock (or direct Anthropic API as fallback)
     BEDROCK_MODEL_ID: str = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
     BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
     BEDROCK_API_REGION: str = "ap-south-1"
+    ANTHROPIC_API_KEY: str = ""        # Direct Anthropic API key (fallback when Bedrock billing blocked)
     
     # JWT Settings
     JWT_SECRET: str = "your-secret-key-change-in-production"
