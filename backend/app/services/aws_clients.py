@@ -50,14 +50,6 @@ class AWSClients:
         return self._session.client("bedrock-runtime")
     
     @lru_cache()
-    def transcribe(self):
-        return self._session.client("transcribe")
-    
-    @lru_cache()
-    def polly(self):
-        return self._session.client("polly")
-    
-    @lru_cache()
     def textract(self):
         return self._session.client("textract")
     

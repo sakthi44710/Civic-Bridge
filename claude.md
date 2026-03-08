@@ -1,6 +1,6 @@
-# CivicBridge — Project Reference
+4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-07 (commit `0881815`)
+> **Last updated:** 2026-03-08
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -38,7 +38,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 - **Scheme Discovery** — Search, match, and check eligibility for government schemes
 - **Live Form Filling** — Playwright browser automation fills real government portal forms
 - **Document Management** — Upload, OCR (Textract), classify (Bedrock), and auto-extract data
-- **Multi-language** — 22 Indian languages via AWS Translate, Polly, Transcribe
+- **Multi-language** — 22 Indian languages via AWS Translate
 - **Google OAuth + OTP Auth** — Cognito federation + phone OTP login
 
 ---
@@ -58,14 +58,13 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │              Backend (FastAPI + uvicorn)                       │
 │                            │                                  │
 │  ┌─── WS /ws/voice ───────┤                                  │
-│  │    ├─ text_message → AgentOrchestrator → Bedrock AI → TTS  │
+│  │    ├─ text_message → AgentOrchestrator → Bedrock AI        │
 │  │    ├─ voice_transcript → FormAgent (field extraction only) │
 │  │    ├─ tool_call → _dispatch_tool() → service → tool_result │
-│  │    ├─ audio_chunk → Nova Sonic / fallback STT pipeline     │
 │  │    ├─ start_form → FormAgentService → Playwright           │
 │  │    └─ submit_otp / submit_captcha → live browser           │
 │  │                                                            │
-│  ├─── REST /api/v1/* ─── auth, users, chat, voice, docs, …  │
+│  ├─── REST /api/v1/* ─── auth, users, chat, docs, schemes, … │
 │  │                                                            │
 │  ├─── Services Layer                                          │
 │  │    ├─ bedrock_service    (Llama 3 70B via Converse API)    │
@@ -74,7 +73,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │  │    ├─ form_agent_service (Playwright live form filling)     │
 │  │    ├─ page_analyzer      (AI field discovery on portals)   │
 │  │    ├─ agent_orchestrator (multi-agent coordinator)          │
-│  │    └─ polly/transcribe/translate/s3/dynamodb/…             │
+│  │    └─ translate/s3/dynamodb/…                              │
 │  │                                                            │
 │  └─── Data: DynamoDB tables + S3 buckets + local JSON seeds   │
 └───────────────────────────────────────────────────────────────┘
@@ -94,7 +93,6 @@ Civic Bridge/
 │   │   │   ├── auth.py                # POST /auth/send-otp, verify-otp, register, google
 │   │   │   ├── users.py               # GET/PUT /users/me, GET /users/me/dashboard
 │   │   │   ├── chat.py                # POST /chat/message, GET conversations
-│   │   │   ├── voice.py               # POST /voice/process (audio→STT→AI→TTS)
 │   │   │   ├── documents.py           # CRUD /documents/ + upload + check-requirements
 │   │   │   ├── schemes.py             # GET /schemes/ search/match/eligibility
 │   │   │   ├── applications.py        # CRUD /applications/ + automate + OTP + submit + track
@@ -108,9 +106,6 @@ Civic Bridge/
 │   │   │   ├── form_agent_service.py  # Live Playwright form filling agent
 │   │   │   ├── page_analyzer.py       # AI page understanding for govt portals
 │   │   │   ├── agent_orchestrator.py  # Multi-agent: Convo (instant) + Research/Form (bg)
-│   │   │   ├── nova_sonic_service.py  # AWS Nova Sonic speech-to-speech
-│   │   │   ├── polly_service.py       # AWS Polly TTS (Kajal neural voice)
-│   │   │   ├── transcribe_service.py  # AWS Transcribe STT
 │   │   │   ├── translate_service.py   # AWS Translate
 │   │   │   ├── dynamodb_service.py    # All DynamoDB CRUD
 │   │   │   ├── s3_service.py          # S3 file operations
@@ -162,9 +157,7 @@ Civic Bridge/
 │   │   │   ├── Globe.jsx              # 3D globe (Spline)
 │   │   │   └── LoadingSkeleton.jsx    # Loading placeholder
 │   │   ├── hooks/
-│   │   │   ├── useElevenLabsCall.js   # PRIMARY: ElevenLabs voice + backend WS + client tools
-│   │   │   ├── useNovaSonicCall.js    # Nova Sonic WS streaming (legacy)
-│   │   │   └── useVoiceCall.js        # REST-based voice (legacy)
+│   │   │   └── useElevenLabsCall.js   # ElevenLabs voice + backend WS + client tools
 │   │   ├── services/
 │   │   │   └── api.js                 # Axios instance + API modules
 │   │   └── store/
@@ -209,11 +202,6 @@ All routes prefixed with `/api/v1`.
 | GET | `/chat/conversations` | List conversations |
 | GET | `/chat/conversations/{id}` | Get conversation |
 | DELETE | `/chat/conversations/{id}` | Delete conversation |
-
-### Voice (`voice.py`)
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/voice/process` | Audio → STT → AI → TTS → audio response |
 
 ### Documents (`documents.py`)
 | Method | Path | Purpose |
@@ -271,9 +259,8 @@ All routes prefixed with `/api/v1`.
 
 | type | Fields | Purpose |
 |------|--------|---------|
-| `session_start` | `language`, `conversation_id?`, `scheme_id?` | Init session, load profile, start Nova Sonic |
-| `audio_chunk` | `data` (base64 PCM) | Stream audio to Nova Sonic or fallback STT |
-| `text_message` | `data` (string) | Text input → orchestrator → AI → TTS |
+| `session_start` | `language`, `conversation_id?`, `scheme_id?` | Init session, load profile |
+| `text_message` | `data` (string) | Text input → orchestrator → AI |
 | `voice_transcript` | `data` (string) | ElevenLabs user transcript → form agent only (no backend AI) |
 | `assistant_message` | `data` (string) | ElevenLabs AI response → form agent context |
 | `tool_call` | `call_id`, `tool`, `params` | Client tool dispatch from ElevenLabs agent |
@@ -286,10 +273,9 @@ All routes prefixed with `/api/v1`.
 
 | type | Fields | Purpose |
 |------|--------|---------|
-| `session_started` | `conversation_id`, `nova_sonic`, `form_session?` | Confirms init |
-| `audio_chunk` | `data`, `format` | AI speech audio (base64 mp3/pcm) |
+| `session_started` | `conversation_id`, `form_session?` | Confirms init |
 | `transcript` | `role`, `text` | User or assistant transcript |
-| `status` | `status` | listening / speaking / processing / idle |
+| `status` | `status` | listening / processing / idle |
 | `form_update` | `data` (see below) | Live form progress + screenshot |
 | `form_started` | `scheme_id`, `session_id` | Form session confirmed |
 | `tool_result` | `call_id`, `result` | Response to tool_call |
@@ -405,15 +391,6 @@ The ElevenLabs voice agent triggers backend actions via client tools.
 - **Key method:** `process(user_message, history, profile, language, conversation_id, document_context, form_context)` → {response, intent, agents_used, form_update}
 - **Web search:** Auto-detects scheme discovery intent → DuckDuckGo → passes results to AI
 
-### NovaSonicService (`nova_sonic_service.py`)
-- **Purpose:** Amazon Nova Sonic speech-to-speech streaming
-- **Status:** Available but ElevenLabs is now primary voice engine
-- Used as fallback when `session_start` message triggers Nova Sonic path
-
-### PollyService / TranscribeService / TranslateService
-- AWS managed services for TTS, STT, translation
-- Used in fallback voice pipeline (when not using ElevenLabs)
-
 ---
 
 ## Frontend Key Components
@@ -441,7 +418,7 @@ The ElevenLabs voice agent triggers backend actions via client tools.
 ### API Layer (services/api.js)
 - Axios instance at `/api/v1` with JWT Bearer token interceptor
 - Auto-redirects to `/auth` on 401
-- Modules: `authAPI`, `userAPI`, `chatAPI`, `voiceAPI`, `documentsAPI`, `schemesAPI`, `applicationsAPI`
+- Modules: `authAPI`, `userAPI`, `chatAPI`, `documentsAPI`, `schemesAPI`, `applicationsAPI`
 
 ---
 

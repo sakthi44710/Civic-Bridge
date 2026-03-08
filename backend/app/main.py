@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import auth, users, chat, voice, documents, schemes, applications, translate, digilocker
+from app.routes import auth, users, chat, documents, schemes, applications, translate, digilocker
 from app.routes import ws as websocket_routes
 
 # Configure logging
@@ -46,7 +46,6 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
-app.include_router(voice.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(schemes.router, prefix="/api/v1")
 app.include_router(applications.router, prefix="/api/v1")

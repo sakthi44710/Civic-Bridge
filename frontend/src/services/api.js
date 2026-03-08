@@ -55,22 +55,6 @@ export const chatAPI = {
   deleteConversation: (id) => api.delete(`/chat/conversations/${id}`),
 };
 
-// Voice API
-export const voiceAPI = {
-  processVoice: (formData) =>
-    api.post('/voice/process', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    }),
-  synthesize: (text, language) => {
-    const formData = new FormData();
-    formData.append('text', text);
-    formData.append('language', language);
-    return api.post('/voice/synthesize', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-  },
-};
-
 // Documents API
 export const documentsAPI = {
   upload: (file, document_type) => {

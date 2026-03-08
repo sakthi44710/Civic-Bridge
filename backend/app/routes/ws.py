@@ -1,42 +1,46 @@
 """
-WebSocket Routes - Real-time Bidirectional Voice + Live Form Projection
+WebSocket Routes - Real-time Voice + Live Form Projection
 
 This WebSocket endpoint handles:
-  1. Speech-to-speech streaming via Amazon Nova Sonic
+  1. ElevenLabs voice agent tool calls + form filling coordination
   2. Live form-filling updates from the background agent
   3. Real-time status updates
+
+Voice is handled entirely by ElevenLabs (WebRTC). This WS is for
+tool dispatch, form updates, and text chat only.
 
 Protocol (JSON messages over WebSocket):
 
 Frontend → Backend:
   {"type": "session_start", "language": "hi", "conversation_id": "...", "scheme_id": "..."}
-  {"type": "audio_chunk", "data": "<base64 PCM 16kHz 16-bit mono>"}
   {"type": "text_message", "data": "user typed text"}
+  {"type": "voice_transcript", "data": "user speech from ElevenLabs"}
+  {"type": "assistant_message", "data": "ElevenLabs AI response"}
+  {"type": "tool_call", "call_id": "...", "tool": "...", "params": {...}}
+  {"type": "start_form", "scheme_id": "..."}
+  {"type": "submit_otp", "otp": "..."}
+  {"type": "submit_captcha", "text": "..."}
   {"type": "session_end"}
 
 Backend → Frontend:
-  {"type": "audio_chunk", "data": "<base64 PCM 24kHz 16-bit mono>"}
+  {"type": "session_started", "conversation_id": "...", "form_session": "..."}
   {"type": "transcript", "role": "user|assistant", "text": "..."}
-  {"type": "status", "status": "listening|speaking|processing|idle"}
+  {"type": "status", "status": "listening|processing|idle"}
   {"type": "form_update", "data": {...fields, screenshot, progress...}}
-  {"type": "session_started", "conversation_id": "...", "nova_sonic": true|false}
+  {"type": "form_started", "scheme_id": "...", "session_id": "..."}
+  {"type": "tool_result", "call_id": "...", "result": "..."}
   {"type": "error", "message": "..."}
 """
 import asyncio
-import base64
 import json
 import logging
 import re
-import struct
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 
-from app.services.nova_sonic_service import nova_sonic_service, NovaSonicSession
 from app.services.form_agent_service import form_agent_service, FormFillingSession
 from app.services.scheme_service import scheme_service
 from app.services.agent_orchestrator import orchestrator
-from app.services.transcribe_service import transcribe_service
-from app.services.polly_service import polly_service
 from app.services.dynamodb_service import db
 from app.services.document_service import document_service
 from app.services.translate_service import translate_service
@@ -95,7 +99,6 @@ async def voice_websocket(
         "conversation_id": None,
         "language": "en",
         "scheme_id": None,
-        "nova_session": None,
         "form_session": None,
         "conversation_history": [],
         "user_profile": {},
@@ -122,9 +125,6 @@ async def voice_websocket(
 
             if msg_type == "session_start":
                 await _handle_session_start(websocket, session_state, msg)
-
-            elif msg_type == "audio_chunk":
-                await _handle_audio_chunk(websocket, session_state, msg)
 
             elif msg_type == "text_message":
                 await _handle_text_message(websocket, session_state, msg)
@@ -202,12 +202,10 @@ async def voice_websocket(
 # ═══════════════════════════════════════════════════════════
 
 async def _handle_session_start(websocket: WebSocket, state: dict, msg: dict):
-    """Handle session_start message — initialize Nova Sonic + form agent."""
+    """Handle session_start message — initialize session + form agent."""
     state["language"] = msg.get("language", "en")
     state["conversation_id"] = msg.get("conversation_id") or generate_id()
     state["scheme_id"] = msg.get("scheme_id")
-
-    use_nova_sonic = nova_sonic_service.is_available()
 
     # Load conversation history
     try:
@@ -223,41 +221,6 @@ async def _handle_session_start(websocket: WebSocket, state: dict, msg: dict):
     except Exception:
         pass
 
-    if use_nova_sonic:
-        # Create Nova Sonic session with transcript callback for form agent
-        async def on_transcript(role, text):
-            """Called when Nova Sonic produces a transcript."""
-            # Feed to form agent
-            if state.get("form_session"):
-                await state["form_session"].on_conversation_text(role, text)
-
-            # Save to conversation history
-            state["conversation_history"].append({"role": role, "content": text})
-
-            # Save to DynamoDB (background)
-            asyncio.ensure_future(_save_message(state, role, text))
-
-        nova_session = nova_sonic_service.create_session(
-            language=state["language"],
-            conversation_history=state["conversation_history"],
-            user_profile=state["user_profile"],
-            on_transcript=on_transcript,
-        )
-
-        success = await nova_session.create()
-        if success:
-            state["nova_session"] = nova_session
-
-            # Start receiving Nova Sonic output in background
-            asyncio.ensure_future(
-                _stream_nova_output(websocket, state, nova_session)
-            )
-
-            logger.info(f"Nova Sonic session started for {state['user_id']}")
-        else:
-            use_nova_sonic = False
-            logger.warning("Nova Sonic session creation failed, using fallback")
-
     # Start form agent if scheme is specified
     if state.get("scheme_id"):
         await _start_form_agent(websocket, state)
@@ -266,37 +229,10 @@ async def _handle_session_start(websocket: WebSocket, state: dict, msg: dict):
     await websocket.send_json({
         "type": "session_started",
         "conversation_id": state["conversation_id"],
-        "nova_sonic": use_nova_sonic,
         "form_session": state["form_session"].session_id if state.get("form_session") else None,
     })
 
     await websocket.send_json({"type": "status", "status": "listening"})
-
-
-async def _handle_audio_chunk(websocket: WebSocket, state: dict, msg: dict):
-    """Handle incoming audio chunk from the client."""
-    audio_b64 = msg.get("data", "")
-    if not audio_b64:
-        return
-
-    nova_session: NovaSonicSession = state.get("nova_session")
-
-    if nova_session:
-        # Stream directly to Nova Sonic (speech-to-speech)
-        await nova_session.send_audio(audio_b64)
-    else:
-        # Fallback: accumulate PCM chunks, then process after 2.5s of silence
-        if "audio_buffer" not in state:
-            state["audio_buffer"] = []
-        state["audio_buffer"].append(audio_b64)
-
-        # Cancel previous debounce timer and start a fresh one
-        prev = state.get("audio_debounce_task")
-        if prev and not prev.done():
-            prev.cancel()
-        state["audio_debounce_task"] = asyncio.ensure_future(
-            _process_audio_after_silence(websocket, state)
-        )
 
 
 async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
@@ -384,22 +320,6 @@ async def _handle_text_message(websocket: WebSocket, state: dict, msg: dict):
             form_update = ai_result.get("form_update")
             if form_update:
                 await websocket.send_json({"type": "form_update", "data": form_update})
-
-        # Synthesize speech for the AI response (fallback TTS)
-        if not state.get("nova_session"):
-            try:
-                spoken = _make_tts_text(ai_response)
-                if spoken:
-                    tts_result = polly_service.synthesize(spoken, state.get("language", "en"))
-                    audio_b64 = tts_result.get("audio_base64", "")
-                    if audio_b64:
-                        await websocket.send_json({
-                            "type": "audio_chunk",
-                            "data": audio_b64,
-                            "format": "mp3",
-                        })
-            except Exception:
-                pass
 
         # Save to history
         state["conversation_history"].append({"role": "user", "content": text})
@@ -788,254 +708,6 @@ async def _handle_session_end(websocket: WebSocket, state: dict):
     logger.info(f"Session ended for {state['user_id']}")
 
 
-# ═════════════════════════════════════════════════════════
-# Fallback Audio Pipeline  (STT → Bedrock → Polly)
-# ═════════════════════════════════════════════════════════
-
-async def _process_audio_after_silence(websocket: WebSocket, state: dict,
-                                        silence_s: float = 2.2):
-    """
-    Debounced fallback: waits for silence_s seconds after the last audio chunk,
-    then runs the full STT → AI → TTS pipeline.
-    """
-    try:
-        await asyncio.sleep(silence_s)
-
-        buffer: list = state.pop("audio_buffer", [])
-        if not buffer:
-            return
-
-        # Need at least ~0.3s of audio (0.3 * 16000 Hz * 2 bytes = 9600 bytes)
-        try:
-            total_pcm = b"".join(base64.b64decode(c) for c in buffer)
-        except Exception:
-            return
-        if len(total_pcm) < 9600:
-            await websocket.send_json({"type": "status", "status": "listening"})
-            return
-
-        await websocket.send_json({"type": "status", "status": "processing"})
-
-        # ── 1. STT via Transcribe ────────────────────────
-        text = ""
-        try:
-            wav_bytes = _pcm16_to_wav(total_pcm)
-            stt_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: transcribe_service.transcribe_audio(
-                    wav_bytes, state.get("language", "en"), "wav"
-                )
-            )
-            text = (stt_result.get("text") or stt_result.get("transcript") or "").strip()
-        except Exception as e:
-            logger.warning(f"STT error: {e}")
-
-        if not text:
-            await websocket.send_json({"type": "status", "status": "listening"})
-            return
-
-        # ── 2. Send user transcript ─────────────────────
-        await websocket.send_json({"type": "transcript", "role": "user", "text": text})
-        if state.get("form_session"):
-            await state["form_session"].on_conversation_text("user", text)
-
-        # ── 3. AI response via Bedrock ─────────────────
-        form_context = _build_form_context(state)
-        try:
-            ai_result = await orchestrator.process(
-                user_message=text,
-                conversation_history=state.get("conversation_history", []),
-                user_profile=state.get("user_profile", {}),
-                language=state.get("language", "en"),
-                conversation_id=state.get("conversation_id"),
-                document_context=state.get("document_context", ""),
-                form_context=form_context,
-            )
-            ai_response = ai_result.get("message", "") if isinstance(ai_result, dict) else str(ai_result)
-            if not ai_response:
-                ai_response = "I'm processing your request. Let me help you with that."
-            ai_response = _strip_json_artifacts(ai_response)
-        except Exception as e:
-            logger.error(f"AI error in audio fallback: {e}")
-            ai_response = "Sorry, I couldn't process that. Please try again."
-
-        # ── 4. Send AI transcript + feed form agent ───
-        await websocket.send_json({"type": "status", "status": "speaking"})
-        await websocket.send_json({"type": "transcript", "role": "assistant", "text": ai_response})
-        if state.get("form_session"):
-            await state["form_session"].on_conversation_text("assistant", ai_response)
-
-        # Auto-start form agent when schemes are suggested
-        if not state.get("form_session"):
-            should_start, scheme_id = _should_start_form(text, ai_result, state)
-            if should_start:
-                state["scheme_id"] = scheme_id
-                await _start_form_agent(websocket, state)
-                await websocket.send_json({
-                    "type": "form_started",
-                    "scheme_id": scheme_id,
-                    "session_id": state["form_session"].session_id if state.get("form_session") else None,
-                })
-
-        # ── 5. TTS via Polly (clean spoken text only) ──
-        try:
-            spoken = _make_tts_text(ai_response)
-            if spoken:
-                tts = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: polly_service.synthesize(spoken, state.get("language", "en"))
-                )
-                audio_out = tts.get("audio_base64", "")
-                if audio_out:
-                    await websocket.send_json({
-                        "type": "audio_chunk",
-                        "data": audio_out,
-                        "format": "mp3",
-                    })
-        except Exception as e:
-            logger.warning(f"TTS error: {e}")
-
-        # ── 6. Save conversation ──────────────────────
-        state["conversation_history"].append({"role": "user", "content": text})
-        state["conversation_history"].append({"role": "assistant", "content": ai_response})
-        asyncio.ensure_future(_save_message(state, "user", text))
-        asyncio.ensure_future(_save_message(state, "assistant", ai_response))
-
-        await websocket.send_json({"type": "status", "status": "listening"})
-
-    except asyncio.CancelledError:
-        pass  # More audio arrived — debounce reset, that's expected
-    except Exception as e:
-        logger.error(f"Audio fallback pipeline error: {e}")
-        try:
-            await websocket.send_json({"type": "status", "status": "listening"})
-        except Exception:
-            pass
-
-
-def _make_tts_text(message: str, max_sentences: int = 2) -> str:
-    """
-    Convert an AI markdown message to a short spoken summary.
-
-    Strategy (voice-friendly):
-      1. Extract **bold / highlighted** key phrases
-      2. Extract concise bullet / numbered-list items
-      3. Fall back to the first 2 sentences if neither exist
-    This keeps speech short so the assistant speaks only the key points.
-    """
-    if not message:
-        return ""
-
-    # ── 0. Strip leaked metadata ─────────────────────
-    text = message
-    text = re.sub(r'\*{0,2}(Suggested Actions|Suggested Schemes|Intent|Detected Language|Requires Info)\*{0,2}\s*[:\[].*', '', text, flags=re.DOTALL)
-    text = re.sub(r'\[\{"type".*?\}\]', '', text, flags=re.DOTALL)
-
-    # ── 1. Collect highlighted / bold phrases ────────
-    bold_phrases = re.findall(r'\*{2,3}([^*]{3,})\*{2,3}', text)
-    bold_phrases = [p.strip().rstrip(':').rstrip('.') for p in bold_phrases if len(p.strip()) > 2]
-
-    # ── 2. Collect bullet / numbered-list items (first 4) ────
-    bullet_items = re.findall(r'^\s*(?:[-*•]|\d+[.)])\s+(.+)', text, re.MULTILINE)
-    bullet_items = [b.strip() for b in bullet_items if len(b.strip()) > 3][:4]
-
-    # ── 3. Build spoken text ─────────────────────────
-    # Strip all markdown for the plain version
-    plain = text
-    plain = re.sub(r'^#+\s+', '', plain, flags=re.MULTILINE)
-    plain = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', plain)
-    plain = re.sub(r'`[^`]*`', '', plain)
-    plain = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', plain)
-    plain = re.sub(r'^[-*>|] *', '', plain, flags=re.MULTILINE)
-    plain = re.sub(r'^\d+\.\s+', '', plain, flags=re.MULTILINE)
-    plain = re.sub(r'\n+', ' ', plain)
-    plain = re.sub(r'\s{2,}', ' ', plain).strip()
-
-    # First sentence is the intro / direct answer
-    sentence_end = re.compile(r'(?<=[.!?])\s+')
-    sentences = [s.strip() for s in sentence_end.split(plain) if s.strip()]
-    intro = sentences[0] if sentences else plain[:200]
-
-    if bullet_items:
-        # Speak the intro + up to 4 bullet points
-        points = ', '.join(bullet_items[:4])
-        spoken = f"{intro}. Key points: {points}."
-    elif bold_phrases:
-        # Speak the intro + bold highlights
-        highlights = ', '.join(bold_phrases[:4])
-        spoken = f"{intro}. Highlights: {highlights}."
-    else:
-        # No structure — just the first 2 sentences
-        spoken = ' '.join(sentences[:max_sentences])
-
-    # Hard cap at ~400 chars so Polly is fast
-    if len(spoken) > 400:
-        spoken = spoken[:397].rsplit(' ', 1)[0] + '...'
-    return spoken
-
-
-def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 16000,
-                  channels: int = 1, bits: int = 16) -> bytes:
-    """Wrap raw 16-bit PCM bytes in a minimal WAV container."""
-    data_size = len(pcm_bytes)
-    header = struct.pack(
-        '<4sI4s4sIHHIIHH4sI',
-        b'RIFF', 36 + data_size, b'WAVE',
-        b'fmt ', 16, 1,          # PCM format
-        channels, sample_rate,
-        sample_rate * channels * bits // 8,
-        channels * bits // 8, bits,
-        b'data', data_size,
-    )
-    return header + pcm_bytes
-
-
-# ═══════════════════════════════════════════════════════════
-# Nova Sonic Output Stream
-# ═══════════════════════════════════════════════════════════
-
-async def _stream_nova_output(websocket: WebSocket, state: dict,
-                               nova_session: NovaSonicSession):
-    """
-    Background task: receive events from Nova Sonic and forward to client.
-    This runs for the lifetime of the Nova Sonic session.
-    """
-    try:
-        async for event in nova_session.receive():
-            event_type = event.get("type")
-
-            if event_type == "audio":
-                # Forward AI audio to client
-                await websocket.send_json({
-                    "type": "audio_chunk",
-                    "data": event["data"],
-                    "format": "pcm",
-                })
-
-            elif event_type == "transcript":
-                # Forward transcript to client
-                await websocket.send_json({
-                    "type": "transcript",
-                    "role": event.get("role", "assistant"),
-                    "text": event.get("text", ""),
-                })
-
-            elif event_type == "turn_start":
-                await websocket.send_json({"type": "status", "status": "speaking"})
-
-            elif event_type == "turn_end":
-                await websocket.send_json({"type": "status", "status": "listening"})
-
-            elif event_type == "error":
-                await websocket.send_json({
-                    "type": "error",
-                    "message": event.get("message", "Nova Sonic error"),
-                })
-
-    except Exception as e:
-        logger.error(f"Nova Sonic output stream error: {e}")
-
-
 # ═══════════════════════════════════════════════════════════
 # Form Agent
 # ═══════════════════════════════════════════════════════════
@@ -1198,11 +870,11 @@ async def _start_form_agent(websocket: WebSocket, state: dict):
 
     async def on_form_update(update: dict):
         """Callback: send form updates to the client via WebSocket.
-        Also sends a spoken voice notification when OTP or CAPTCHA is needed."""
+        Also sends a transcript notification when OTP or CAPTCHA is needed."""
         try:
             await websocket.send_json(update)
 
-            # Voice notification for OTP / CAPTCHA — text + TTS audio
+            # Notification for OTP / CAPTCHA — send as transcript for display
             data = update.get("data", {})
             status = data.get("status", "")
             spoken_text = None
@@ -1214,23 +886,9 @@ async def _start_form_agent(websocket: WebSocket, state: dict):
                                "Please look at the screen and enter the CAPTCHA text.")
 
             if spoken_text:
-                # Send as transcript for display
                 await websocket.send_json({
                     "type": "transcript", "role": "assistant", "text": spoken_text,
                 })
-                # Also synthesize TTS so the user hears it
-                try:
-                    tts_result = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: polly_service.synthesize(spoken_text, state.get("language", "en")),
-                    )
-                    audio_b64 = tts_result.get("audio_base64", "")
-                    if audio_b64:
-                        await websocket.send_json({
-                            "type": "audio_chunk", "data": audio_b64, "format": "mp3",
-                        })
-                except Exception:
-                    pass
         except Exception:
             pass
 
@@ -1290,17 +948,6 @@ async def _save_message(state: dict, role: str, text: str):
 
 async def _cleanup_session(state: dict):
     """Clean up all session resources."""
-    # Cancel any pending audio debounce task
-    debounce = state.get("audio_debounce_task")
-    if debounce and not debounce.done():
-        debounce.cancel()
-
-    # Close Nova Sonic
-    nova_session = state.get("nova_session")
-    if nova_session:
-        await nova_session.close()
-        state["nova_session"] = None
-
     # Close form agent
     form_session = state.get("form_session")
     if form_session:

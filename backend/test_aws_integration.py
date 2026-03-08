@@ -1,6 +1,6 @@
 """
 CivicBridge - Deep AWS Integration Test
-Tests actual AWS operations: DynamoDB CRUD, S3, Polly, Bedrock, Translate
+Tests actual AWS operations: DynamoDB CRUD, S3, Bedrock, Translate
 """
 import json
 import sys
@@ -18,7 +18,6 @@ from app.main import app
 from app.services.auth_service import auth_service
 from app.services.dynamodb_service import db
 from app.services.s3_service import s3_service
-from app.services.polly_service import polly_service
 from app.services.translate_service import translate_service
 from app.services.bedrock_service import bedrock_service
 from app.services.scheme_service import scheme_service
@@ -170,26 +169,7 @@ except Exception as e:
     test("S3: Delete file", False, str(e)[:80])
 
 # ============================================================
-# 3. Polly (TTS)
-# ============================================================
-print("\n=== POLLY (TTS) ===")
-
-try:
-    result = polly_service.synthesize("Hello, welcome to CivicBridge!", "en")
-    has_audio = len(result.get("audio_base64", "")) > 100
-    test("Polly: English TTS", has_audio, f"{len(result.get('audio_base64',''))} chars base64")
-except Exception as e:
-    test("Polly: English TTS", False, str(e)[:80])
-
-try:
-    result = polly_service.synthesize("Namaste, CivicBridge mein aapka swagat hai!", "hi")
-    has_audio = len(result.get("audio_base64", "")) > 100
-    test("Polly: Hindi TTS", has_audio, f"{len(result.get('audio_base64',''))} chars base64")
-except Exception as e:
-    test("Polly: Hindi TTS", False, str(e)[:80])
-
-# ============================================================
-# 4. Translate
+# 3. Translate
 # ============================================================
 print("\n=== TRANSLATE ===")
 

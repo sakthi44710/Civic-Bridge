@@ -78,22 +78,7 @@ except Exception as e:
     results["S3"] = f"FAIL - {e}"
 
 # ============================================================
-# 3. Polly (TTS)
-# ============================================================
-print(f"\n{'='*60}")
-print("3. POLLY (Text-to-Speech)")
-try:
-    polly = session.client("polly")
-    resp = polly.synthesize_speech(Text="Test", OutputFormat="mp3", VoiceId="Aditi", LanguageCode="hi-IN")
-    audio_len = len(resp["AudioStream"].read())
-    print(f"   Hindi TTS: {audio_len} bytes")
-    results["Polly"] = f"READY ({audio_len} bytes test)"
-except Exception as e:
-    print(f"   ERROR: {e}")
-    results["Polly"] = f"FAIL - {e}"
-
-# ============================================================
-# 4. Bedrock (AI)
+# 3. Bedrock (AI)
 # ============================================================
 print(f"\n{'='*60}")
 print("4. BEDROCK (AI Chat)")
@@ -194,21 +179,7 @@ except Exception as e:
     results["Textract"] = f"FAIL - {str(e)[:80]}"
 
 # ============================================================
-# 8. Transcribe (Speech-to-Text)
-# ============================================================
-print(f"\n{'='*60}")
-print("8. TRANSCRIBE (Speech-to-Text)")
-try:
-    ts = session.client("transcribe")
-    resp = ts.list_transcription_jobs(MaxResults=1)
-    print(f"   API responding: {len(resp.get('TranscriptionJobSummaries', []))} jobs")
-    results["Transcribe"] = "READY"
-except Exception as e:
-    print(f"   ERROR: {e}")
-    results["Transcribe"] = f"FAIL - {str(e)[:80]}"
-
-# ============================================================
-# 9. OTP / Auth
+# 8. OTP / Auth
 # ============================================================
 print(f"\n{'='*60}")
 print("9. OTP / AUTH SERVICE")
