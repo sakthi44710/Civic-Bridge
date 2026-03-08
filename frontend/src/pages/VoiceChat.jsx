@@ -12,7 +12,7 @@
 import { useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Mic, MicOff, Send, PhoneOff, Phone, MonitorPlay, CheckCircle, Loader2, Eye } from "lucide-react";
-import { useElevenLabsCall } from "../hooks/useElevenLabsCall";
+import { useVoiceCall } from "../hooks/useVoiceCall";
 import { useAuthStore } from "../store";
 
 const NOVNC_BASE = import.meta.env.VITE_NOVNC_URL || "http://localhost:6080";
@@ -77,7 +77,7 @@ export default function VoiceChat() {
     toggleRecording,
     sendTextMessage,
     submitOtp, submitCaptcha,
-  } = useElevenLabsCall({
+  } = useVoiceCall({
     token,
     onFormUpdate: (data) => {
       setFormInfo(data);

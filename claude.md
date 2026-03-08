@@ -1,6 +1,6 @@
 4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-08 20:45 IST (bulbul:v3 Ishita 8kHz, config cleanup — no SMART_MODEL/Twilio, VoiceChat.jsx stale code removed)
+> **Last updated:** 2026-03-08 21:30 IST (renamed useElevenLabsCall → useVoiceCall, removed all ElevenLabs references, UMANG theme on VoiceChat.jsx)
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -49,7 +49,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Frontend (React + Vite)                   │
-│  VoiceChat.jsx ─── useElevenLabsCall.js ─── Sarvam AI (STT+TTS)│
+│  VoiceChat.jsx ─── useVoiceCall.js ─────── Sarvam AI (STT+TTS) │
 │       │                    │                                      │
 │       │              Backend WebSocket  ← audio binary frames     │
 │  noVNC <iframe>  ──────────┤  (full voice pipeline)              │
@@ -166,7 +166,7 @@ Civic Bridge/
 │   │   │   ├── Globe.jsx              # 3D globe (Spline)
 │   │   │   └── LoadingSkeleton.jsx    # Loading placeholder
 │   │   ├── hooks/
-│   │   │   └── useElevenLabsCall.js   # Push-to-talk MediaRecorder + backend WS (no ElevenLabs)
+│   │   │   └── useVoiceCall.js        # Push-to-talk MediaRecorder + backend WS (Sarvam + Claude)
 │   │   ├── services/
 │   │   │   └── api.js                 # Axios instance + API modules
 │   │   └── store/
@@ -337,7 +337,7 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 ## Backend Services Reference
 
 ### SarvamService (`sarvam_service.py`)
-- **Purpose:** Sarvam AI Indian-language STT + TTS — replaces ElevenLabs voice pipeline
+- **Purpose:** Sarvam AI Indian-language STT + TTS — full voice pipeline (Sarvam STT saarika:v2 + TTS bulbul:v3)
 - **STT model:** `saarika:v2` — transcribes audio and **auto-detects language** (returns BCP-47 code)
 - **TTS model:** `bulbul:v3` — speaks back in the detected/requested language; Ishita speaker; 8000 Hz (low frequency)
 - **Auth:** `api-subscription-key` header
@@ -418,15 +418,17 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 ## Frontend Key Components
 
 ### VoiceChat.jsx (main page)
-- Uses `useElevenLabsCall` hook for push-to-talk voice + form filling
+- Uses `useVoiceCall` hook for push-to-talk voice + form filling
+- **Theme:** UMANG light design system — navy `#1a237e`, saffron `#FF9933`, white cards, `framer-motion` animations
 - State: `inCall`, `status`, `isRecording`, `messages[]`, `formInfo`, `textInput`, OTP/CAPTCHA state
 - **Push-to-talk:** Tap mic button to record, tap again to stop + send audio to backend
 - **Text input row:** Type and submit while in a session; sends `text_message` WS frame
 - Live browser viewport: noVNC `<iframe>` shown when form filling starts
 - OTP/CAPTCHA modals overlay the live browser when agent requests user input
 
-### useElevenLabsCall.js (primary hook — name kept for import compat)
-- **No ElevenLabs dependency** — uses browser MediaRecorder + WebSocket only
+### useVoiceCall.js (primary hook)
+- **File:** `frontend/src/hooks/useVoiceCall.js` — exported as `useVoiceCall`
+- Uses browser MediaRecorder + WebSocket only — no third-party voice SDK
 - **Push-to-talk:** `startRecording()` → MediaRecorder (WebM/Opus) → `stopRecording()` → binary WS frame
 - **Audio playback:** Receives `audio_response` (base64 WAV) → enqueued in `audioQueueRef` → plays sequentially via `_playNextAudio()`
 - **Backend WS:** Connects to `/api/v1/ws/voice?token=...`
@@ -497,8 +499,9 @@ GOOGLE_CLIENT_SECRET=...
 - **Fix:** Use Playwright **sync API** in a `ThreadPoolExecutor(max_workers=1)`. Never use `async_playwright` with uvicorn on Windows.
 - **Commit:** `3b1f813`
 
-### Duplicate AI responses (historical — ElevenLabs era, now removed)
-- ElevenLabs fully removed; all voice AI is now Sarvam STT + Claude Haiku 4.5 + Sarvam TTS in ws.py.
+### Voice pipeline is fully Sarvam AI — no third-party voice SDK
+- All voice AI: Sarvam STT (saarika:v2) → Claude Haiku 4.5 → Sarvam TTS (bulbul:v3) in `ws.py`
+- Hook: `useVoiceCall` in `frontend/src/hooks/useVoiceCall.js`
 
 ### Form agent not triggering from text chat
 - **Cause:** Form start detection only happened in voice pipeline, not text pipeline
@@ -514,14 +517,14 @@ GOOGLE_CLIENT_SECRET=...
 ## Git History (recent)
 
 ```
+dd638e2 feat: apply UMANG light theme to VoiceChat.jsx — teammate design
+2eb1678 docs: update claude.md
 4b2028d refactor: clean up stale config/code from migration prompt
 3b2c785 perf: speed-optimize voice pipeline + audit fixes
 732492c feat: replace ElevenLabs with Sarvam AI STT/TTS + Claude Haiku 4.5 (Bedrock)
 88dd555 feat: noVNC live browser + Claude Sonnet 4.6 + SNS OTP + clean architecture
-f8d59f7 refactor: remove Polly, Transcribe, Nova Sonic — use ElevenLabs only for voice
 343ce3e docs: add claude.md project reference for AI assistant debugging and memory
 0881815 feat: enhance agent workflow with form filling tools and document auto-fill
-ce6c7fe feat: add ElevenLabs client tools for backend action workflows
 3b1f813 fix: use Playwright sync API in dedicated thread to bypass Windows subprocess issue
 ```
 
@@ -541,7 +544,7 @@ ce6c7fe feat: add ElevenLabs client tools for backend action workflows
 - **Error handling:** Services return dicts with error fields (not exceptions) for graceful degradation. WS sends `{"type": "error", "message": ...}` on failures.
 
 ### Frontend
-- **Hook pattern:** `useElevenLabsCall` (file kept for import compat) manages push-to-talk MediaRecorder + backend WS. Returns `startCall`, `endCall`, `toggleRecording`, `sendTextMessage`, etc.
+- **Hook pattern:** `useVoiceCall` (`frontend/src/hooks/useVoiceCall.js`) manages push-to-talk MediaRecorder + backend WS. Returns `startCall`, `endCall`, `toggleRecording`, `sendTextMessage`, etc.
 - **Push-to-talk:** `startRecording()` → MediaRecorder captures WebM/Opus → `stopRecording()` → binary WS frame → backend STT.
 - **Audio playback queue:** `audioQueueRef` buffers incoming sentence WAV chunks; `_playNextAudio()` plays them sequentially so streamed sentences don't overlap.
 - **Form updates:** `onFormUpdate` callback receives `form_update.data` → VoiceChat.jsx updates `formInfo` + shows noVNC iframe.

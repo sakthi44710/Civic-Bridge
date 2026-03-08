@@ -1,6 +1,6 @@
-﻿// useElevenLabsCall.js  (file kept as-is for import compatibility)
+﻿// useVoiceCall.js
 //
-// Voice pipeline — Sarvam AI + Claude Haiku 4.5 (replaces ElevenLabs)
+// Voice pipeline — Sarvam AI + Claude Haiku 4.5 (Bedrock)
 //
 // Architecture:
 //   Frontend  → MediaRecorder (WebM/Opus) → WebSocket binary frame
@@ -16,7 +16,7 @@ import { useRef, useState, useCallback, useEffect } from "react";
 const WS_BASE     = import.meta.env.VITE_WS_URL || "ws://localhost:8000";
 const WS_ENDPOINT = `${WS_BASE}/api/v1/ws/voice`;
 
-export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormStopped, onTranscript }) {
+export function useVoiceCall({ token, onFormUpdate, onFormStarted, onFormStopped, onTranscript }) {
   const [inCall, setInCall]           = useState(false);
   const [status, setStatus]           = useState("idle");
   const [isRecording, setIsRecording] = useState(false);
