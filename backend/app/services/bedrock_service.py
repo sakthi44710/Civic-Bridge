@@ -116,7 +116,7 @@ class BedrockService:
     def __init__(self):
         self.client = aws.bedrock_runtime()
         self.chat_model = settings.BEDROCK_MODEL_ID       # Claude Haiku 4.5 - fast
-        self.smart_model = settings.BEDROCK_SMART_MODEL    # Claude Haiku 4.5 - deep
+        self.smart_model = settings.BEDROCK_MODEL_ID      # Claude Haiku 4.5 - deep analysis
 
     # ============================================================
     # converse_raw — used by the voice pipeline (tool_use support)

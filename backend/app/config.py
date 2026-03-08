@@ -29,12 +29,10 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI Services - Claude Haiku 4.5 (voice) via Bedrock Converse API
-    BEDROCK_MODEL_ID: str = "anthropic.claude-haiku-4-5"     # Voice + general tasks
-    BEDROCK_SMART_MODEL: str = "anthropic.claude-haiku-4-5"   # Deep analysis + eligibility
-    # Bedrock API key (Bearer token auth) — alternative to IAM SigV4
-    BEDROCK_API_KEY: str = ""            # ABSK... key from AWS Bedrock console
-    BEDROCK_API_REGION: str = "us-east-1" # Region where API key is scoped
+    # AI — Claude Haiku 4.5 via Bedrock (replaces Llama 3 70B for ALL tasks)
+    BEDROCK_MODEL_ID: str = "anthropic.claude-haiku-4-5"
+    BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
+    BEDROCK_API_REGION: str = "ap-south-1"
     
     # JWT Settings
     JWT_SECRET: str = "your-secret-key-change-in-production"
@@ -44,13 +42,13 @@ class Settings(BaseSettings):
     # Sarvam AI — Indian language STT + TTS
     SARVAM_API_KEY: str = ""             # From sarvam.ai dashboard
 
-    # AWS SNS — OTP SMS delivery
+    # AWS SNS OTP (Twilio removed)
     SNS_SENDER_ID: str = "CivicBridge"
 
-    # Legacy Twilio (unused — kept for backwards compat with old .env files)
-    TWILIO_ACCOUNT_SID: str = ""
-    TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_PHONE_NUMBER: str = ""
+    # Live browser (noVNC)
+    DISPLAY: str = ":99"
+    NOVNC_PORT: int = 6080
+    VNC_PORT: int = 5900
     
     # AWS Cognito (Google OAuth)
     COGNITO_USER_POOL_ID: str = ""

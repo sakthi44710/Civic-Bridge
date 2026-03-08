@@ -49,7 +49,6 @@ class FormFillingSession:
     current_page: int = 1
     total_pages: int = 1
     page_name: str = ""
-    _on_real_portal: bool = False
     _page_fields_cache: List[Dict] = field(default_factory=list)
 
     # Playwright browser objects -- managed inside _pw_executor thread only
