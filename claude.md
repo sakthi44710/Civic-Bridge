@@ -166,7 +166,7 @@ Civic Bridge/
 │   │   │   ├── Globe.jsx              # 3D globe (Spline)
 │   │   │   └── LoadingSkeleton.jsx    # Loading placeholder
 │   │   ├── hooks/
-│   │   │   └── useElevenLabsCall.js   # ElevenLabs voice + backend WS + client tools
+│   │   │   └── useElevenLabsCall.js   # Push-to-talk MediaRecorder + backend WS (no ElevenLabs)
 │   │   ├── services/
 │   │   │   └── api.js                 # Axios instance + API modules
 │   │   └── store/
@@ -192,7 +192,7 @@ All routes prefixed with `/api/v1`.
 ### Auth (`auth.py`)
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/auth/send-otp` | Send OTP to phone (Twilio SMS) |
+| POST | `/auth/send-otp` | Send OTP to phone (AWS SNS) |
 | POST | `/auth/verify-otp` | Verify OTP → JWT token |
 | POST | `/auth/register` | Register new user |
 | POST | `/auth/google` | Google OAuth login (id_token) |
@@ -306,9 +306,6 @@ All routes prefixed with `/api/v1`.
   "total_fields": 18,
   "filled_fields": { "full_name": "Raj Kumar", ... },
   "newly_filled": ["full_name", "dob"],
-  "screenshot_base64": "...",
-  "screenshot_format": "jpeg",
-  "real_portal": true,
   "page_name": "Personal Details",
   "timestamp": "2026-03-07T..."
 }
@@ -342,12 +339,12 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 ### SarvamService (`sarvam_service.py`)
 - **Purpose:** Sarvam AI Indian-language STT + TTS — replaces ElevenLabs voice pipeline
 - **STT model:** `saarika:v2` — transcribes audio and **auto-detects language** (returns BCP-47 code)
-- **TTS model:** `bulbul:v2` — speaks back in the detected/requested language, auto-selects speaker per language
+- **TTS model:** `bulbul:v3` — speaks back in the detected/requested language; Ishita speaker; 8000 Hz (low frequency)
 - **Auth:** `api-subscription-key` header
 - **Key methods:**
   - `async speech_to_text(audio_bytes, hint_language?)` → `{text, language_code, detected_language}`
   - `async text_to_speech(text, language)` → raw WAV bytes (22050 Hz 16-bit mono)
-- **Speaker map:** hi-IN→meera, ta-IN→pavithra, te-IN→arvind, kn-IN→pavithra, bn-IN→amartya, mr-IN→aarohi, en-IN→meera
+- **Speaker:** `ishita` — fixed for all languages; model `bulbul:v3`; `speech_sample_rate=8000` Hz (low frequency)
 - **Singleton:** `sarvam_service`
 
 ### BedrockService (`bedrock_service.py`)
@@ -387,7 +384,6 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
   - `total_fields: int`
   - `waiting_for: Optional[str]` — `None` | `'otp'` | `'captcha'`
   - `current_page / total_pages`
-  - `_on_real_portal: bool` — True when on actual govt portal
   - `_page_fields_cache: List[Dict]` — AI-discovered fields
 - **Key session methods:**
   - `start(user_data)` — launch browser, discover fields, pre-fill from profile
@@ -396,8 +392,7 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
   - `get_filled_fields()` → List[str] of filled field labels
   - `submit_otp(otp)` / `submit_captcha(text)` — relay to browser
   - `close()` — stop browser + cleanup
-- **CDP Screencast:** `_start_screencast()` → `Page.screencastFrame` at ~5 FPS for live browser streaming
-- **Micro-screenshots:** During fill operations — scroll, highlight (cyan outline), char-by-char typing, screenshot after each field
+- **Live browser:** noVNC streams Xvfb :99 directly — no screenshots in WebSocket
 - **Portal URL resolution:** `_resolve_portal_url()` → checks form_config → scheme record → seed data JSON
 - **Browser strategy:** Try real portal first → fallback to `static/form_template.html`
 
@@ -411,28 +406,27 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 
 ### AgentOrchestrator (`agent_orchestrator.py`)
 - **Singleton:** `orchestrator`
-- **Architecture:** Conversation Agent runs **instantly** (Llama 3 70B). Research/Form/Document agents run in background (fire-and-forget). Ensures <1s voice replies.
-- **Key method:** `process(user_message, history, profile, language, conversation_id, document_context, form_context)` → {response, intent, agents_used, form_update}
-- **Web search:** Auto-detects scheme discovery intent → DuckDuckGo → passes results to AI
+- **Role:** Thin wrapper — only handles document processing background tasks. All conversation is owned by Claude Haiku 4.5 in `ws.py` tool_use loop.
+- **Key method:** `process_document_background(user_id, document_id)` — runs document pipeline asynchronously after upload.
 
 ---
 
 ## Frontend Key Components
 
 ### VoiceChat.jsx (main page)
-- Uses `useElevenLabsCall` hook for voice + form filling
-- State: `inCall`, `status`, `messages[]`, `formInfo`, `formScreenshot`, `interactionPrompt`
-- Live browser viewport: shows form screenshots with scanline animation
-- OTP/CAPTCHA modals when form agent requests user input
-- Text input field for typing (sends to both ElevenLabs + backend)
+- Uses `useElevenLabsCall` hook for push-to-talk voice + form filling
+- State: `inCall`, `status`, `isRecording`, `messages[]`, `formInfo`, `textInput`, OTP/CAPTCHA state
+- **Push-to-talk:** Tap mic button to record, tap again to stop + send audio to backend
+- **Text input row:** Type and submit while in a session; sends `text_message` WS frame
+- Live browser viewport: noVNC `<iframe>` shown when form filling starts
+- OTP/CAPTCHA modals overlay the live browser when agent requests user input
 
-### useElevenLabsCall.js (primary hook)
-- **ElevenLabs:** Agent ID `agent_7601kk4db73hey2a3gc5e9jxemqd`, WebRTC via `@elevenlabs/react`
+### useElevenLabsCall.js (primary hook — name kept for import compat)
+- **No ElevenLabs dependency** — uses browser MediaRecorder + WebSocket only
+- **Push-to-talk:** `startRecording()` → MediaRecorder (WebM/Opus) → `stopRecording()` → binary WS frame
+- **Audio playback:** Receives `audio_response` (base64 WAV) → `new Audio(...).play()`
 - **Backend WS:** Connects to `/api/v1/ws/voice?token=...`
-- **Client tools:** 11 tools registered — sends `tool_call` WS messages, resolves via `tool_result`
-- **`callBackendTool(toolName, params)`** — Promise with 15s timeout
-- **`pendingToolCallsRef`** — `{ callId: { resolve, reject, timer } }`
-- **Exports:** `startCall`, `endCall`, `sendTextMessage`, `startFormSession`, `submitOtp`, `submitCaptcha`, `skipResponse`, etc.
+- **Exports:** `startCall`, `endCall`, `toggleRecording`, `startRecording`, `stopRecording`, `sendTextMessage`, `submitOtp`, `submitCaptcha`
 
 ### State Management (Zustand)
 - `useAuthStore` — `user`, `token`, `isAuthenticated`, `login()`, `logout()`
@@ -466,13 +460,22 @@ CONVERSATIONS_TABLE=civicbridge-conversations
 DOCUMENTS_BUCKET=civicbridge-documents
 SCREENSHOTS_BUCKET=civicbridge-screenshots
 
-# AI Model
-BEDROCK_MODEL_ID=meta.llama3-70b-instruct-v1:0
+# AI — Claude Haiku 4.5 via Bedrock (voice + all tasks)
+BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5
+# Bearer-token auth (use if IAM/SigV4 not working)
+BEDROCK_API_KEY=ABSK...
+BEDROCK_API_REGION=ap-south-1
 
-# Optional
-TWILIO_ACCOUNT_SID=...          # SMS OTP
-TWILIO_AUTH_TOKEN=...
-TWILIO_PHONE_NUMBER=...
+# Sarvam AI — STT + TTS for Indian languages (sarvam.ai)
+SARVAM_API_KEY=sk_...
+
+# Live browser (noVNC)
+DISPLAY=:99
+NOVNC_PORT=6080
+VNC_PORT=5900
+
+# Auth (Google OAuth via Cognito + OTP via AWS SNS)
+SNS_SENDER_ID=CivicBridge
 COGNITO_USER_POOL_ID=...        # Google OAuth
 COGNITO_CLIENT_ID=...
 COGNITO_CLIENT_SECRET=...
@@ -490,17 +493,12 @@ GOOGLE_CLIENT_SECRET=...
 - **Fix:** Use Playwright **sync API** in a `ThreadPoolExecutor(max_workers=1)`. Never use `async_playwright` with uvicorn on Windows.
 - **Commit:** `3b1f813`
 
-### Duplicate AI responses when ElevenLabs is active
-- **Cause:** User transcript was being sent to both ElevenLabs (which generates AI response) AND the backend orchestrator (which generates a second AI response)
-- **Fix:** Added `voice_transcript` message type — backend feeds form agent only, does NOT run AI pipeline. ElevenLabs handles all AI reasoning + speech.
+### Duplicate AI responses (historical — ElevenLabs era, now removed)
+- ElevenLabs fully removed; all voice AI is now Sarvam STT + Claude Haiku 4.5 + Sarvam TTS in ws.py.
 
 ### Form agent not triggering from text chat
 - **Cause:** Form start detection only happened in voice pipeline, not text pipeline
-- **Fix:** Added form trigger detection in `_handle_text_message()` (commit `95e1f64`, `88e2581`)
-
-### CDP screencast not starting
-- **Cause:** Headless Chromium may not support CDP in all configurations
-- **Fix:** `_start_screencast()` catches errors gracefully and falls back to 2-second periodic screenshots via `_live_frame_streamer()`
+- **Fix:** Added form trigger detection in `_handle_text()` (ws.py)
 
 ### `get_form_status` returning wrong data
 - **Cause:** Was using `form_session.filled_fields` (doesn't exist) instead of `form_session.collected_fields`
@@ -512,19 +510,15 @@ GOOGLE_CLIENT_SECRET=...
 ## Git History (recent)
 
 ```
+732492c feat: replace ElevenLabs with Sarvam AI STT/TTS + Claude Haiku 4.5 (Bedrock)
+88dd555 feat: noVNC live browser + Claude Sonnet 4.6 + SNS OTP + clean architecture
+f8d59f7 refactor: remove Polly, Transcribe, Nova Sonic — use ElevenLabs only for voice
+343ce3e docs: add claude.md project reference for AI assistant debugging and memory
 0881815 feat: enhance agent workflow with form filling tools and document auto-fill
 ce6c7fe feat: add ElevenLabs client tools for backend action workflows
 7e660b8 feat: live browser streaming with CDP screencast + micro-screenshots
 f67c017 feat: integrate ElevenLabs Conversational AI for voice chat
 3b1f813 fix: use Playwright sync API in dedicated thread to bypass Windows subprocess issue
-500d423 fix: Playwright browser not launching on Windows
-88e2581 fix: form filling now triggers reliably from text chat
-2fd0c39 fix: prevent duplicate user messages in text chat
-95e1f64 fix: enable form filling from text chat (not just voice)
-c78a525 fix: 3 blocking bugs in form filling pipeline
-64e79fa feat: real-portal form filling with AI page analysis and landscape browser view
-b5b1a84 Voice-driven form filling: background agent, live projection, AI field prompting
-50e2e3b fix: speech fragmentation, serialized AI calls, key-points TTS
 ```
 
 ---
@@ -534,30 +528,39 @@ b5b1a84 Voice-driven form filling: background agent, live projection, AI field p
 ### Backend
 - **Singletons:** All services are module-level singletons (e.g., `scheme_service = SchemeService()`)
 - **Async + sync Playwright:** All Playwright calls go through `_pw_executor` (ThreadPoolExecutor). Use `await loop.run_in_executor(_pw_executor, sync_fn)` to call sync Playwright from async handlers.
-- **WebSocket state:** Each WS connection gets a `session_state` dict with: `user_id`, `user_profile`, `conversation_id`, `language`, `form_session`, `conversation_history`, `scheme_id`, etc.
+- **WebSocket state:** Each WS connection gets a `session_state` dict with: `user_id`, `user_profile`, `conversation_id`, `language`, `conversation_history`, `_doc_context` (cached).
+- **Background form start:** `start_form_filling` tool fires `asyncio.create_task(_start_form_background(...))` so Claude can respond to user immediately without waiting for browser launch.
+- **Sentence streaming TTS:** `sarvam_service.text_to_speech_sentences()` splits Claude response by sentence boundary, calls TTS per sentence, streams each `audio_response` WS frame as it's ready. First audio plays ~400ms after Claude responds.
+- **httpx keep-alive:** `SarvamService._get_client()` returns a shared `httpx.AsyncClient` — avoids TCP handshake overhead on every STT/TTS call.
+- **Claude speed settings:** `max_tokens=300`, `temperature=0.3` — 30-40% faster responses, appropriate for short voice replies.
+- **Doc context cache:** `session_state["_doc_context"]` cached per WS session — no repeated DynamoDB reads per turn.
 - **Error handling:** Services return dicts with error fields (not exceptions) for graceful degradation. WS sends `{"type": "error", "message": ...}` on failures.
 
 ### Frontend
 - **Hook pattern:** `useElevenLabsCall` (file kept for import compat) manages push-to-talk MediaRecorder + backend WS. Returns `startCall`, `endCall`, `toggleRecording`, `sendTextMessage`, etc.
 - **Push-to-talk:** `startRecording()` → MediaRecorder captures WebM/Opus → `stopRecording()` → binary WS frame → backend STT.
-- **Audio playback:** Backend sends `audio_response` with base64 WAV → `new Audio("data:audio/wav;base64,...").play()`.
+- **Audio playback queue:** `audioQueueRef` buffers incoming sentence WAV chunks; `_playNextAudio()` plays them sequentially so streamed sentences don't overlap.
 - **Form updates:** `onFormUpdate` callback receives `form_update.data` → VoiceChat.jsx updates `formInfo` + shows noVNC iframe.
 
 ### Data Flow (Voice Chat)
 ```
 User speaks → MediaRecorder (WebM) → WS binary frame
                      ↓
-              ws.py: Sarvam STT → detected language
+              ws.py: Sarvam STT → detected language     (~400-800ms)
                      ↓
-              Claude Haiku 4.5 (tool_use loop)
+              send transcript to frontend               ← immediate
+                     ↓
+              Claude Haiku 4.5 (tool_use loop)          (~300-600ms)
                      ↓ if tool needed
               _execute_tool() → service → result string → back to Claude
+              (form tools fired as background task — non-blocking)
                      ↓
               Claude final response text
                      ↓
-              Sarvam TTS (in detected language) → WAV bytes
+              sentence-split → Sarvam TTS per sentence  (~200-400ms/sentence)
                      ↓
-              WS audio_response (base64 WAV) → frontend plays audio
+              WS audio_response per sentence → frontend queues + plays
+              (first sentence plays while rest are TTS-ing)
 ```
 
 ### Data Flow (Form Filling)

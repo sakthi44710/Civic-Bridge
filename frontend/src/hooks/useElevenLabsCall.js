@@ -24,8 +24,10 @@ export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormSt
   const wsRef          = useRef(null);
   const mediaRecRef    = useRef(null);
   const streamRef      = useRef(null);
-  const audioCtxRef    = useRef(null);
   const isActiveRef    = useRef(false);
+  // Audio queue — plays WAV sentences sequentially so they don't overlap
+  const audioQueueRef  = useRef([]);
+  const isPlayingRef   = useRef(false);
 
   // ------------------------------------------------------------------
   // WebSocket connection + message handler
@@ -68,7 +70,7 @@ export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormSt
         break;
 
       case "audio_response":
-        _playAudio(msg.data);
+        _enqueueAudio(msg.data);
         break;
 
       case "form_started":
@@ -93,17 +95,36 @@ export function useElevenLabsCall({ token, onFormUpdate, onFormStarted, onFormSt
   }, [onFormUpdate, onFormStarted, onFormStopped, onTranscript]);
 
   // ------------------------------------------------------------------
-  // Audio playback — play base64 WAV received from Sarvam TTS
+  // Audio playback queue — sentences play sequentially, not overlapping
   // ------------------------------------------------------------------
-  const _playAudio = (base64wav) => {
+  const _playNextAudio = useCallback(async () => {
+    if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+    isPlayingRef.current = true;
+
+    const b64 = audioQueueRef.current.shift();
     try {
-      const audio = new Audio(`data:audio/wav;base64,${base64wav}`);
-      audio.onended = () => setStatus("listening");
-      audio.play().catch((e) => console.warn("[Audio play]", e));
+      const audio = new Audio(`data:audio/wav;base64,${b64}`);
+      await new Promise((resolve) => {
+        audio.onended = resolve;
+        audio.onerror = resolve;
+        audio.play().catch(resolve);
+      });
     } catch (e) {
-      console.warn("[Audio decode]", e);
+      console.warn("[Audio]", e);
     }
-  };
+
+    isPlayingRef.current = false;
+    if (audioQueueRef.current.length > 0) {
+      _playNextAudio();
+    } else {
+      setStatus("listening");
+    }
+  }, []);
+
+  const _enqueueAudio = useCallback((b64) => {
+    audioQueueRef.current.push(b64);
+    _playNextAudio();
+  }, [_playNextAudio]);
 
   // ------------------------------------------------------------------
   // Push-to-talk recording

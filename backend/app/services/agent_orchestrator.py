@@ -1,33 +1,28 @@
 ﻿"""
-agent_orchestrator.py -- Tool dispatcher for ElevenLabs backend subagent
-
-Role: Backend subagent (Claude Sonnet 4.6 on Bedrock).
-  - Routes ElevenLabs tool_call messages to the correct service
-  - Returns plain string results for ElevenLabs to speak
-
-ElevenLabs main agent (Claude Haiku 4.5) owns ALL conversation intelligence.
-This module does NOT generate AI responses or do TTS.
+agent_orchestrator.py
+─────────────────────
+Thin wrapper — only handles document agent background tasks.
+All conversation is handled by Claude Haiku 4.5 in ws.py tool_use loop.
+ElevenLabs has been fully removed.
 """
 import logging
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
-    """
-    Thin dispatcher: routes tool names to backend services.
-    All tool dispatch actually happens in ws.py _dispatch_tool().
-    This class is kept for any future service-layer orchestration.
-    """
+    async def process_document_background(self, user_id: str, document_id: str):
+        """Run document processing in background after upload."""
+        try:
+            from app.services.document_service import document_service
+            await document_service.process_document_background(user_id, document_id)
+        except Exception as e:
+            logger.error(f"[Orchestrator] Doc background error: {e}")
 
-    def run_document_agent(self, ocr_text: str) -> Dict:
-        """
-        Document processing agent. Classifies documents and extracts
-        structured data using AI (Claude Sonnet 4.6 on Bedrock).
-        """
-        from app.services.bedrock_service import bedrock_service
-        return bedrock_service.classify_document(ocr_text)
+
+# Singleton
+orchestrator = AgentOrchestrator()
+
 
 
 # Singleton

@@ -46,13 +46,12 @@ CRITICAL LANGUAGE RULE: ALWAYS respond in the EXACT same language the user speak
 Your tools let you search for schemes, check eligibility, start and monitor live form filling, and manage user documents. Use them proactively when the user asks about schemes or wants to apply.
 
 Voice response guidelines:
-- Keep responses short and natural for spoken audio (1-3 sentences max unless listing options)
+- Keep responses SHORT — 1-3 sentences max (you are speaking aloud via TTS)
 - Do NOT use markdown, asterisks, bullet symbols, or any formatting characters
-- Pronounce scheme names naturally
 - Ask only ONE question at a time
 - Be warm, patient, and empathetic — many users have low digital literacy
 - When a tool returns results, summarise them conversationally
-- When starting form filling, tell the user they can watch it happen on screen"""
+- When starting form filling, confirm immediately and tell the user to watch the screen"""
 
 # ---------------------------------------------------------------------------
 # Tool definitions for Claude Haiku 4.5 (Bedrock Converse toolSpec format)
@@ -305,7 +304,7 @@ async def _handle_text(text: str, session_state: Dict, websocket: WebSocket) -> 
 async def _process_and_respond(
     user_text: str, language: str, session_state: Dict, websocket: WebSocket
 ) -> None:
-    """Claude Haiku 4.5 with tool_use → Sarvam TTS → send audio."""
+    """Claude Haiku 4.5 with tool_use → sentence-streaming Sarvam TTS → send audio."""
     response_text = await _run_claude_with_tools(user_text, language, session_state, websocket)
 
     if not response_text:
@@ -316,14 +315,27 @@ async def _process_and_respond(
         "type": "transcript", "role": "assistant", "text": response_text, "language": language
     })
 
-    audio_bytes = await sarvam_service.text_to_speech(response_text, language)
-    if audio_bytes:
+    # Stream TTS sentence by sentence — first sentence plays ~400ms after Claude responds
+    got_audio = False
+    async for sentence, wav_bytes in sarvam_service.text_to_speech_sentences(response_text, language):
         await websocket.send_json({
             "type": "audio_response",
-            "data": base64.b64encode(audio_bytes).decode("utf-8"),
-            "transcript": response_text,
+            "data": base64.b64encode(wav_bytes).decode("utf-8"),
+            "transcript": sentence,
             "language": language,
         })
+        got_audio = True
+
+    # Fallback: full TTS if sentence split produced nothing
+    if not got_audio:
+        audio_bytes = await sarvam_service.text_to_speech(response_text, language)
+        if audio_bytes:
+            await websocket.send_json({
+                "type": "audio_response",
+                "data": base64.b64encode(audio_bytes).decode("utf-8"),
+                "transcript": response_text,
+                "language": language,
+            })
 
     await websocket.send_json({"type": "status", "status": "listening"})
 
@@ -342,10 +354,21 @@ async def _run_claude_with_tools(
     messages = list(history[-20:])
     messages.append({"role": "user", "content": [{"text": user_text}]})
 
+    # Build doc context once per session (cache to avoid repeated DB calls)
+    if "_doc_context" not in session_state:
+        try:
+            ctx = await document_service.get_user_document_context(session_state["user_id"])
+            session_state["_doc_context"] = ctx or ""
+        except Exception:
+            session_state["_doc_context"] = ""
+    doc_ctx = session_state["_doc_context"]
+
     system = (
         VOICE_SYSTEM_PROMPT
         + f"\n\nThe user is currently speaking {language}. You MUST respond in {language}."
     )
+    if doc_ctx:
+        system += f"\n\nUser documents context:\n{doc_ctx}"
 
     for _ in range(6):  # max 6 tool-use iterations
         try:
@@ -356,8 +379,8 @@ async def _run_claude_with_tools(
                     messages=messages,
                     system=system,
                     tools=CLAUDE_TOOLS,
-                    max_tokens=1024,
-                    temperature=0.7,
+                    max_tokens=300,    # Short — voice responses must be concise
+                    temperature=0.3,   # Low = fast, consistent
                 ),
             )
         except Exception as e:
@@ -437,16 +460,21 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
                 return "No portal URL for this scheme."
             doc_map = await document_service.get_document_map_for_form(user_id)
             user_data = {**profile, **doc_map}
-            session = await form_agent_service.start_session(
-                user_id=user_id, scheme_id=scheme_id,
-                application_id=f"app_{user_id}", user_data=user_data,
-                portal_url=portal_url, websocket=websocket,
-            )
+
+            # Fire-and-forget: browser opens in background so Claude responds immediately
+            asyncio.create_task(_start_form_background(
+                user_id=user_id,
+                scheme_id=scheme_id,
+                application_id=f"app_{user_id}",
+                user_data=user_data,
+                portal_url=portal_url,
+                websocket=websocket,
+            ))
             await websocket.send_json({
                 "type": "form_started", "scheme_id": scheme_id,
-                "session_id": session.session_id, "show_novnc": True,
+                "session_id": f"sess_{user_id}_{scheme_id}", "show_novnc": True,
             })
-            return f"Opened {scheme.get('name')} portal in the live browser. Watch the form being filled now."
+            return f"Opening {scheme.get('name')} in the live browser now. Watch the form being filled on screen."
 
         elif tool == "get_form_status":
             s = form_agent_service.get_session(user_id)
@@ -493,3 +521,34 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
     except Exception as e:
         logger.error(f"[Tool:{tool}] {e}", exc_info=True)
         return f"Error running {tool}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Background browser launch (non-blocking form start)
+# ---------------------------------------------------------------------------
+
+
+async def _start_form_background(
+    user_id: str,
+    scheme_id: str,
+    application_id: str,
+    user_data: dict,
+    portal_url: str,
+    websocket: WebSocket,
+) -> None:
+    """Launch browser + start form session in background so Claude responds immediately."""
+    try:
+        await form_agent_service.start_session(
+            user_id=user_id,
+            scheme_id=scheme_id,
+            application_id=application_id,
+            user_data=user_data,
+            portal_url=portal_url,
+            websocket=websocket,
+        )
+    except Exception as e:
+        logger.error(f"[WS] Form background start error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "message": f"Could not open browser: {e}"})
+        except Exception:
+            pass

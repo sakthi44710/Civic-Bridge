@@ -1,16 +1,20 @@
-"""Sarvam AI Service — Indian language STT (saarika:v2) + TTS (bulbul:v2)
+"""Sarvam AI Service — Indian language STT (saarika:v2) + TTS (bulbul:v3)
 
 STT  → POST https://api.sarvam.ai/speech-to-text
 TTS  → POST https://api.sarvam.ai/text-to-speech
 Auth → api-subscription-key header
 
 Language detection is automatic via saarika:v2.
-TTS speaker is auto-selected per detected/requested language.
+TTS: Ishita speaker (all languages), bulbul:v3, 8000 Hz.
+
+Uses a shared httpx.AsyncClient per-instance for connection keep-alive (faster calls).
 """
 
+import asyncio
 import base64
 import logging
-from typing import Optional
+import re
+from typing import AsyncGenerator, Optional, Tuple
 
 import httpx
 
@@ -31,19 +35,19 @@ LANG_MAP: dict[str, str] = {
     "ta-IN": "ta-IN", "te-IN": "te-IN", "en-IN": "en-IN",
 }
 
-# Default Sarvam speaker per language
+# Fixed TTS speaker — Ishita (all languages)
 SPEAKER_MAP: dict[str, str] = {
-    "hi-IN": "meera",
-    "bn-IN": "amartya",
-    "gu-IN": "meera",
-    "kn-IN": "pavithra",
-    "ml-IN": "meera",
-    "mr-IN": "aarohi",
-    "od-IN": "meera",
-    "pa-IN": "meera",
-    "ta-IN": "pavithra",
-    "te-IN": "arvind",
-    "en-IN": "meera",
+    "hi-IN": "ishita",
+    "bn-IN": "ishita",
+    "gu-IN": "ishita",
+    "kn-IN": "ishita",
+    "ml-IN": "ishita",
+    "mr-IN": "ishita",
+    "od-IN": "ishita",
+    "pa-IN": "ishita",
+    "ta-IN": "ishita",
+    "te-IN": "ishita",
+    "en-IN": "ishita",
 }
 
 
@@ -53,7 +57,21 @@ def _to_bcp47(lang: str) -> str:
 
 
 class SarvamService:
-    """Sarvam AI: STT (saarika:v2) + TTS (bulbul:v2) for Indian languages."""
+    """Sarvam AI: STT (saarika:v2) + TTS (bulbul:v3, Ishita, 8000 Hz)."""
+
+    def __init__(self) -> None:
+        self._client: Optional[httpx.AsyncClient] = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return shared AsyncClient, creating if needed. Keeps connections alive."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=SARVAM_BASE,
+                headers={"api-subscription-key": settings.SARVAM_API_KEY},
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            )
+        return self._client
 
     # ------------------------------------------------------------------
     # STT
@@ -85,15 +103,14 @@ class SarvamService:
             if hint_language:
                 form_data["language_code"] = _to_bcp47(hint_language)
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{SARVAM_BASE}/speech-to-text",
-                    headers={"api-subscription-key": settings.SARVAM_API_KEY},
-                    files={"file": ("audio.webm", audio_bytes, "audio/webm")},
-                    data=form_data,
-                )
-                resp.raise_for_status()
-                result = resp.json()
+            client = self._get_client()
+            resp = await client.post(
+                "/speech-to-text",
+                files={"file": ("audio.webm", audio_bytes, "audio/webm")},
+                data=form_data,
+            )
+            resp.raise_for_status()
+            result = resp.json()
 
             lang = result.get("language_code", "en-IN")
             text = result.get("transcript", "").strip()
@@ -108,14 +125,13 @@ class SarvamService:
         return {"text": "", "language_code": "en-IN", "detected_language": "en-IN"}
 
     # ------------------------------------------------------------------
-    # TTS
+    # TTS — single call
     # ------------------------------------------------------------------
 
     async def text_to_speech(self, text: str, language: str = "en-IN") -> bytes:
-        """Synthesise text to WAV audio using Sarvam bulbul:v2.
+        """Synthesise text → WAV audio (bulbul:v3, Ishita, 8000 Hz).
 
-        Returns raw WAV bytes (22050 Hz, 16-bit mono).
-        Returns empty bytes on failure or if service is not configured.
+        Returns raw WAV bytes or empty bytes on failure.
         """
         if not settings.SARVAM_API_KEY:
             logger.warning("[Sarvam TTS] SARVAM_API_KEY not set — returning empty")
@@ -126,36 +142,31 @@ class SarvamService:
             return b""
 
         lang = _to_bcp47(language)
-        speaker = SPEAKER_MAP.get(lang, "meera")
-
-        # Sarvam TTS has a ~500 char input limit per request; chunk if needed
+        speaker = SPEAKER_MAP.get(lang, "ishita")
         MAX_CHUNK = 500
         chunks = [text[i : i + MAX_CHUNK] for i in range(0, len(text), MAX_CHUNK)]
 
         all_audio = b""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                for chunk in chunks:
-                    resp = await client.post(
-                        f"{SARVAM_BASE}/text-to-speech",
-                        headers={
-                            "api-subscription-key": settings.SARVAM_API_KEY,
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "inputs": [chunk],
-                            "target_language_code": lang,
-                            "speaker": speaker,
-                            "model": "bulbul:v2",
-                            "enable_preprocessing": True,
-                        },
-                    )
-                    resp.raise_for_status()
-                    audios = resp.json().get("audios", [])
-                    if audios:
-                        all_audio += base64.b64decode(audios[0])
+            client = self._get_client()
+            for chunk in chunks:
+                resp = await client.post(
+                    "/text-to-speech",
+                    json={
+                        "inputs": [chunk],
+                        "target_language_code": lang,
+                        "speaker": speaker,
+                        "model": "bulbul:v3",
+                        "speech_sample_rate": 8000,
+                        "enable_preprocessing": True,
+                    },
+                )
+                resp.raise_for_status()
+                audios = resp.json().get("audios", [])
+                if audios:
+                    all_audio += base64.b64decode(audios[0])
 
-            logger.info(f"[Sarvam TTS] lang={lang} speaker={speaker} audio_bytes={len(all_audio)}")
+            logger.info(f"[Sarvam TTS] lang={lang} speaker={speaker} bytes={len(all_audio)}")
 
         except httpx.HTTPStatusError as e:
             logger.error(f"[Sarvam TTS] HTTP {e.response.status_code}: {e.response.text[:200]}")
@@ -163,6 +174,32 @@ class SarvamService:
             logger.error(f"[Sarvam TTS] {type(e).__name__}: {e}")
 
         return all_audio
+
+    # ------------------------------------------------------------------
+    # TTS — sentence streaming (yields one WAV chunk per sentence)
+    # ------------------------------------------------------------------
+
+    async def text_to_speech_sentences(
+        self, text: str, language: str = "en-IN"
+    ) -> AsyncGenerator[Tuple[str, bytes], None]:
+        """Split text into sentences and yield (sentence, wav_bytes) per sentence.
+
+        Enables streaming audio: first sentence plays while rest are synthesized.
+        """
+        sentences = re.split(r"(?<=[.!?\u0964])\s+", text.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            return
+
+        for sentence in sentences:
+            wav = await self.text_to_speech(sentence, language)
+            if wav:
+                yield sentence, wav
+
+    async def close(self) -> None:
+        """Close the shared HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
 
 sarvam_service = SarvamService()

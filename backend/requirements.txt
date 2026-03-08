@@ -14,8 +14,8 @@ google-auth>=2.25.0
 google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 
-# Twilio (SMS)
-twilio>=8.0.0
+# HTTP client (Sarvam AI + Bedrock API-key auth) — keep-alive connection pooling
+httpx>=0.27.0
 
 # Data Validation
 pydantic>=2.0.0
@@ -23,7 +23,6 @@ pydantic-settings>=2.0.0
 
 # Utilities
 python-dotenv>=1.0.0
-httpx>=0.26.0
 aiofiles>=23.0.0
 
 # Browser automation (headless Chromium for cloud form filling)

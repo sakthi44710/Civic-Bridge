@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import auth, users, chat, documents, schemes, applications, translate, digilocker
 from app.routes import ws as websocket_routes
+from app.config import settings
 
 # Configure logging
 logging.basicConfig(
@@ -52,6 +53,18 @@ app.include_router(applications.router, prefix="/api/v1")
 app.include_router(translate.router, prefix="/api/v1")
 app.include_router(digilocker.router, prefix="/api/v1")
 app.include_router(websocket_routes.router, prefix="/api/v1")
+
+
+# Startup: warm up shared Sarvam httpx client
+@app.on_event("startup")
+async def startup():
+    if not settings.SARVAM_API_KEY:
+        logger.warning("[Startup] SARVAM_API_KEY not set — voice pipeline will not work")
+    else:
+        # Pre-warm shared client so first request is fast
+        from app.services.sarvam_service import sarvam_service
+        sarvam_service._get_client()
+        logger.info("[Startup] Sarvam AI client initialized")
 
 
 # Global exception handlers

@@ -291,9 +291,6 @@ export default function VoiceChat() {
   );
 }
 
-export default function VoiceChat() {
-  const { token } = useAuthStore();
-
   const [showBrowser, setShowBrowser]               = useState(false);
   const [formInfo, setFormInfo]                     = useState(null);
   const [waitingForOtp, setWaitingForOtp]           = useState(false);
