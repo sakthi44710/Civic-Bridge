@@ -1,6 +1,6 @@
 4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-08 (Sarvam AI STT/TTS + Claude Haiku 4.5, noVNC live browser, SNS OTP)
+> **Last updated:** 2026-03-08 20:45 IST (bulbul:v3 Ishita 8kHz, config cleanup — no SMART_MODEL/Twilio, VoiceChat.jsx stale code removed)
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -34,7 +34,7 @@ npm run dev                   # Vite dev server on port 5173
 
 CivicBridge is an AI-powered platform helping Indian citizens discover and apply for government welfare schemes through voice-first, multilingual interactions. Key capabilities:
 
-- **Voice AI Chat** — Sarvam AI (saarika:v2 STT + bulbul:v2 TTS) + Claude Haiku 4.5 (Bedrock) for full voice pipeline
+- **Voice AI Chat** — Sarvam AI (saarika:v2 STT + bulbul:v3 TTS, Ishita speaker, 8 kHz) + Claude Haiku 4.5 (Bedrock) for full voice pipeline
 - **Auto Language Detection** — Sarvam STT detects spoken language; AI responds and speaks back in the same language
 - **Scheme Discovery** — Search, match, and check eligibility for government schemes
 - **Live Form Filling** — Playwright browser automation + noVNC live streaming (user watches real browser)
@@ -70,7 +70,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │  ├─── REST /api/v1/* ─── auth, users, chat, docs, schemes, … │
 │  │                                                            │
 │  ├─── Services Layer                                              │
-│  │    ├─ sarvam_service     (Sarvam AI STT saarika:v2 + TTS bulbul:v2) │
+│  │    ├─ sarvam_service     (Sarvam AI STT saarika:v2 + TTS bulbul:v3, Ishita) │
 │  │    ├─ bedrock_service    (Claude Haiku 4.5 via Bedrock)        │
 │  │    ├─ scheme_service     (search, match, eligibility)          │
 │  │    ├─ document_service   (upload → OCR → classify → RAG)      │
@@ -106,7 +106,7 @@ Civic Bridge/
 │   │   │   ├── digilocker.py          # DigiLocker OAuth flow
 │   │   │   └── ws.py                  # WS /ws/voice — real-time voice + form filling
 │   │   ├── services/
-│   │   │   ├── sarvam_service.py      # Sarvam AI: STT saarika:v2 + TTS bulbul:v2
+│   │   │   ├── sarvam_service.py      # Sarvam AI: STT saarika:v2 + TTS bulbul:v3, Ishita 8kHz
 │   │   │   ├── bedrock_service.py     # Claude Haiku 4.5 via Bedrock (converse_raw + tool_use)
 │   │   │   ├── scheme_service.py      # Scheme discovery + eligibility engine
 │   │   │   ├── document_service.py    # Doc pipeline: S3 → Textract → Comprehend → Bedrock
@@ -341,18 +341,22 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 - **STT model:** `saarika:v2` — transcribes audio and **auto-detects language** (returns BCP-47 code)
 - **TTS model:** `bulbul:v3` — speaks back in the detected/requested language; Ishita speaker; 8000 Hz (low frequency)
 - **Auth:** `api-subscription-key` header
+- **Initialization:** Call `sarvam_service.init(api_key)` on startup (done in `main.py` startup event). Creates shared `httpx.AsyncClient` with keep-alive.
 - **Key methods:**
+  - `init(api_key)` — initialise shared httpx client (called once on startup)
   - `async speech_to_text(audio_bytes, hint_language?)` → `{text, language_code, detected_language}`
-  - `async text_to_speech(text, language)` → raw WAV bytes (22050 Hz 16-bit mono)
-- **Speaker:** `ishita` — fixed for all languages; model `bulbul:v3`; `speech_sample_rate=8000` Hz (low frequency)
-- **Singleton:** `sarvam_service`
+  - `async text_to_speech(text, language)` → raw WAV bytes
+  - `async text_to_speech_sentences(text, language)` → async generator yielding `(sentence, wav_bytes)` per sentence — used by ws.py for streaming
+  - `async close()` — shutdown client on app teardown
+- **Speaker:** `ishita` — fixed for all languages; model `bulbul:v3`; `speech_sample_rate=8000` Hz
+- **Singleton:** `sarvam_service = SarvamService()` — call `sarvam_service.init(key)` on startup
 
 ### BedrockService (`bedrock_service.py`)
 - **Purpose:** AWS Bedrock LLM gateway — Claude Haiku 4.5 via Converse API
-- **Model:** `anthropic.claude-haiku-4-5` (configurable in .env)
-- **Auth:** SigV4 (boto3) OR Bearer token if `BEDROCK_API_KEY` is set (httpx)
-- **Key methods:** `chat()`, `chat_raw()`, `converse_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`
-- **`converse_raw(model_id, messages, system, tools, max_tokens, temperature)`** — returns raw Converse API dict (stopReason, output.message.content). Used by ws.py for tool_use loop.
+- **Model:** `anthropic.claude-haiku-4-5` — set via `BEDROCK_MODEL_ID` in .env (single model for all tasks; `BEDROCK_SMART_MODEL` removed)
+- **Auth:** SigV4 (boto3) OR Bearer token if `BEDROCK_API_KEY` is set (httpx fallback)
+- **Key methods:** `chat()`, `converse_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`
+- **`converse_raw(model_id, messages, system, tools, max_tokens=300, temperature=0.3)`** — returns raw Converse API dict (stopReason, output.message.content). Used by ws.py for tool_use loop. Bearer-token path tries httpx first, falls back to boto3 SigV4.
 
 ### SchemeService (`scheme_service.py`)
 - **Singleton:** `scheme_service`
@@ -424,7 +428,7 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 ### useElevenLabsCall.js (primary hook — name kept for import compat)
 - **No ElevenLabs dependency** — uses browser MediaRecorder + WebSocket only
 - **Push-to-talk:** `startRecording()` → MediaRecorder (WebM/Opus) → `stopRecording()` → binary WS frame
-- **Audio playback:** Receives `audio_response` (base64 WAV) → `new Audio(...).play()`
+- **Audio playback:** Receives `audio_response` (base64 WAV) → enqueued in `audioQueueRef` → plays sequentially via `_playNextAudio()`
 - **Backend WS:** Connects to `/api/v1/ws/voice?token=...`
 - **Exports:** `startCall`, `endCall`, `toggleRecording`, `startRecording`, `stopRecording`, `sendTextMessage`, `submitOtp`, `submitCaptcha`
 
@@ -510,14 +514,14 @@ GOOGLE_CLIENT_SECRET=...
 ## Git History (recent)
 
 ```
+4b2028d refactor: clean up stale config/code from migration prompt
+3b2c785 perf: speed-optimize voice pipeline + audit fixes
 732492c feat: replace ElevenLabs with Sarvam AI STT/TTS + Claude Haiku 4.5 (Bedrock)
 88dd555 feat: noVNC live browser + Claude Sonnet 4.6 + SNS OTP + clean architecture
 f8d59f7 refactor: remove Polly, Transcribe, Nova Sonic — use ElevenLabs only for voice
 343ce3e docs: add claude.md project reference for AI assistant debugging and memory
 0881815 feat: enhance agent workflow with form filling tools and document auto-fill
 ce6c7fe feat: add ElevenLabs client tools for backend action workflows
-7e660b8 feat: live browser streaming with CDP screencast + micro-screenshots
-f67c017 feat: integrate ElevenLabs Conversational AI for voice chat
 3b1f813 fix: use Playwright sync API in dedicated thread to bypass Windows subprocess issue
 ```
 
@@ -530,7 +534,7 @@ f67c017 feat: integrate ElevenLabs Conversational AI for voice chat
 - **Async + sync Playwright:** All Playwright calls go through `_pw_executor` (ThreadPoolExecutor). Use `await loop.run_in_executor(_pw_executor, sync_fn)` to call sync Playwright from async handlers.
 - **WebSocket state:** Each WS connection gets a `session_state` dict with: `user_id`, `user_profile`, `conversation_id`, `language`, `conversation_history`, `_doc_context` (cached).
 - **Background form start:** `start_form_filling` tool fires `asyncio.create_task(_start_form_background(...))` so Claude can respond to user immediately without waiting for browser launch.
-- **Sentence streaming TTS:** `sarvam_service.text_to_speech_sentences()` splits Claude response by sentence boundary, calls TTS per sentence, streams each `audio_response` WS frame as it's ready. First audio plays ~400ms after Claude responds.
+- **Sentence streaming TTS:** `sarvam_service.text_to_speech_sentences()` async generator splits Claude response by sentence boundary `[.!?।]`, calls TTS per sentence, streams each `audio_response` WS frame as it's ready. First audio plays ~400ms after Claude responds.
 - **httpx keep-alive:** `SarvamService._get_client()` returns a shared `httpx.AsyncClient` — avoids TCP handshake overhead on every STT/TTS call.
 - **Claude speed settings:** `max_tokens=300`, `temperature=0.3` — 30-40% faster responses, appropriate for short voice replies.
 - **Doc context cache:** `session_state["_doc_context"]` cached per WS session — no repeated DynamoDB reads per turn.
