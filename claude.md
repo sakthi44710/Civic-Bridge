@@ -1,6 +1,6 @@
 4]# CivicBridge — Project Reference
 
-> **Last updated:** 2026-03-08 21:30 IST (renamed useElevenLabsCall → useVoiceCall, removed all ElevenLabs references, UMANG theme on VoiceChat.jsx)
+> **Last updated:** 2026-03-08 21:45 IST (switched LLM to Claude Sonnet 4.5 for accuracy)
 > This file is the single source of truth for debugging, development, and AI assistant reference.
 > Update this file with every significant change.
 
@@ -34,7 +34,7 @@ npm run dev                   # Vite dev server on port 5173
 
 CivicBridge is an AI-powered platform helping Indian citizens discover and apply for government welfare schemes through voice-first, multilingual interactions. Key capabilities:
 
-- **Voice AI Chat** — Sarvam AI (saarika:v2 STT + bulbul:v3 TTS, Ishita speaker, 8 kHz) + Claude Haiku 4.5 (Bedrock) for full voice pipeline
+- **Voice AI Chat** — Sarvam AI (saarika:v2 STT + bulbul:v3 TTS, Ishita speaker, 8 kHz) + Claude Sonnet 4.5 (Bedrock) for full voice pipeline
 - **Auto Language Detection** — Sarvam STT detects spoken language; AI responds and speaks back in the same language
 - **Scheme Discovery** — Search, match, and check eligibility for government schemes
 - **Live Form Filling** — Playwright browser automation + noVNC live streaming (user watches real browser)
@@ -61,7 +61,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │                            │                                  │
 │  ┌─── WS /ws/voice ───────┤                                        │
 │  │    ├─ audio binary → Sarvam STT → language detect              │
-│  │    ├─ text → Claude Haiku 4.5 (Bedrock, tool_use loop)         │
+│  │    ├─ text → Claude Sonnet 4.5 (Bedrock, tool_use loop)         │
 │  │    ├─ tool_use → _execute_tool() → service → back to Claude    │
 │  │    ├─ Claude response → Sarvam TTS → audio_response            │
 │  │    ├─ submit_otp/captcha → form_agent → live browser           │
@@ -71,7 +71,7 @@ CivicBridge is an AI-powered platform helping Indian citizens discover and apply
 │  │                                                            │
 │  ├─── Services Layer                                              │
 │  │    ├─ sarvam_service     (Sarvam AI STT saarika:v2 + TTS bulbul:v3, Ishita) │
-│  │    ├─ bedrock_service    (Claude Haiku 4.5 via Bedrock)        │
+│  │    ├─ bedrock_service    (Claude Sonnet 4.5 via Bedrock)        │
 │  │    ├─ scheme_service     (search, match, eligibility)          │
 │  │    ├─ document_service   (upload → OCR → classify → RAG)      │
 │  │    ├─ form_agent_service (Playwright HEADFUL on Xvfb :99)      │
@@ -107,7 +107,7 @@ Civic Bridge/
 │   │   │   └── ws.py                  # WS /ws/voice — real-time voice + form filling
 │   │   ├── services/
 │   │   │   ├── sarvam_service.py      # Sarvam AI: STT saarika:v2 + TTS bulbul:v3, Ishita 8kHz
-│   │   │   ├── bedrock_service.py     # Claude Haiku 4.5 via Bedrock (converse_raw + tool_use)
+│   │   │   ├── bedrock_service.py     # Claude Sonnet 4.5 via Bedrock (converse_raw + tool_use)
 │   │   │   ├── scheme_service.py      # Scheme discovery + eligibility engine
 │   │   │   ├── document_service.py    # Doc pipeline: S3 → Textract → Comprehend → Bedrock
 │   │   │   ├── form_agent_service.py  # Live Playwright HEADFUL form filling (noVNC display)
@@ -313,9 +313,9 @@ All routes prefixed with `/api/v1`.
 
 ---
 
-## Claude Haiku 4.5 Tools (11 tools)
+## Claude Sonnet 4.5 Tools (11 tools)
 
-Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
+Claude Sonnet 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 **Flow:** User speaks → Sarvam STT → Claude with tool definitions → tool_use → `_execute_tool()` in ws.py → result back to Claude → TTS → audio to user.
 
 | Tool | Params | Backend Service | Purpose |
@@ -352,8 +352,8 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 - **Singleton:** `sarvam_service = SarvamService()` — call `sarvam_service.init(key)` on startup
 
 ### BedrockService (`bedrock_service.py`)
-- **Purpose:** AWS Bedrock LLM gateway — Claude Haiku 4.5 via Converse API
-- **Model:** `anthropic.claude-haiku-4-5` — set via `BEDROCK_MODEL_ID` in .env (single model for all tasks; `BEDROCK_SMART_MODEL` removed)
+- **Purpose:** AWS Bedrock LLM gateway — Claude Sonnet 4.5 via Converse API
+- **Model:** `global.anthropic.claude-sonnet-4-5-20250929-v1:0` — set via `BEDROCK_MODEL_ID` in .env (global cross-region inference profile; required for Claude 4.x on Bedrock)
 - **Auth:** SigV4 (boto3) OR Bearer token if `BEDROCK_API_KEY` is set (httpx fallback)
 - **Key methods:** `chat()`, `converse_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`
 - **`converse_raw(model_id, messages, system, tools, max_tokens=300, temperature=0.3)`** — returns raw Converse API dict (stopReason, output.message.content). Used by ws.py for tool_use loop. Bearer-token path tries httpx first, falls back to boto3 SigV4.
@@ -410,7 +410,7 @@ Claude Haiku 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 
 ### AgentOrchestrator (`agent_orchestrator.py`)
 - **Singleton:** `orchestrator`
-- **Role:** Thin wrapper — only handles document processing background tasks. All conversation is owned by Claude Haiku 4.5 in `ws.py` tool_use loop.
+- **Role:** Thin wrapper — only handles document processing background tasks. All conversation is owned by Claude Sonnet 4.5 in `ws.py` tool_use loop.
 - **Key method:** `process_document_background(user_id, document_id)` — runs document pipeline asynchronously after upload.
 
 ---
@@ -466,8 +466,8 @@ CONVERSATIONS_TABLE=civicbridge-conversations
 DOCUMENTS_BUCKET=civicbridge-documents
 SCREENSHOTS_BUCKET=civicbridge-screenshots
 
-# AI — Claude Haiku 4.5 via Bedrock (voice + all tasks)
-BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5
+# AI — Claude Sonnet 4.5 via Bedrock (voice + all tasks)
+BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1:0
 # Bearer-token auth (use if IAM/SigV4 not working)
 BEDROCK_API_KEY=ABSK...
 BEDROCK_API_REGION=ap-south-1
@@ -500,7 +500,7 @@ GOOGLE_CLIENT_SECRET=...
 - **Commit:** `3b1f813`
 
 ### Voice pipeline is fully Sarvam AI — no third-party voice SDK
-- All voice AI: Sarvam STT (saarika:v2) → Claude Haiku 4.5 → Sarvam TTS (bulbul:v3) in `ws.py`
+- All voice AI: Sarvam STT (saarika:v2) → Claude Sonnet 4.5 → Sarvam TTS (bulbul:v3) in `ws.py`
 - Hook: `useVoiceCall` in `frontend/src/hooks/useVoiceCall.js`
 
 ### Form agent not triggering from text chat
@@ -557,7 +557,7 @@ User speaks → MediaRecorder (WebM) → WS binary frame
                      ↓
               send transcript to frontend               ← immediate
                      ↓
-              Claude Haiku 4.5 (tool_use loop)          (~300-600ms)
+              Claude Sonnet 4.5 (tool_use loop)          (~600-900ms)
                      ↓ if tool needed
               _execute_tool() → service → result string → back to Claude
               (form tools fired as background task — non-blocking)

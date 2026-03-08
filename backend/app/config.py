@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
     # AI — Claude Haiku 4.5 via Bedrock (replaces Llama 3 70B for ALL tasks)
-    BEDROCK_MODEL_ID: str = "anthropic.claude-haiku-4-5"
+    BEDROCK_MODEL_ID: str = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
     BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
     BEDROCK_API_REGION: str = "ap-south-1"
     

@@ -15,8 +15,7 @@ print("  CIVICBRIDGE - BACKEND HEALTH CHECK")
 print("=" * 60)
 print(f"\n  Region:     {settings.AWS_REGION}")
 print(f"  Access Key: {settings.AWS_ACCESS_KEY_ID[:8]}...{settings.AWS_ACCESS_KEY_ID[-4:]}")
-print(f"  Chat Model: {settings.BEDROCK_MODEL_ID}")
-print(f"  Smart Model:{settings.BEDROCK_SMART_MODEL}")
+print(f"  Model:      {settings.BEDROCK_MODEL_ID}")
 
 results = {}
 
@@ -94,16 +93,7 @@ try:
     chat_text = resp["output"]["message"]["content"][0]["text"].strip()
     print(f"   Chat model ({settings.BEDROCK_MODEL_ID}): {chat_text[:30]}")
     
-    # Test smart model
-    resp = br.converse(
-        modelId=settings.BEDROCK_SMART_MODEL,
-        messages=[{"role": "user", "content": [{"text": "Say OK only."}]}],
-        inferenceConfig={"maxTokens": 20, "temperature": 0}
-    )
-    smart_text = resp["output"]["message"]["content"][0]["text"].strip()
-    print(f"   Smart model ({settings.BEDROCK_SMART_MODEL}): {smart_text[:30]}")
-    
-    results["Bedrock"] = "READY (both models responding)"
+    results["Bedrock"] = f"READY (model responding: {chat_text[:20]})"
 except Exception as e:
     print(f"   ERROR: {e}")
     results["Bedrock"] = f"FAIL - {str(e)[:80]}"
