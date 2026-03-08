@@ -111,7 +111,7 @@ Respond in JSON:
 
 
 class BedrockService:
-    """AWS Bedrock AI Service — Claude Sonnet 4.5 via Converse API or direct Anthropic API"""
+    """AWS Bedrock AI Service — Claude Sonnet 4.5 via Converse API"""
 
     def __init__(self):
         self.client = aws.bedrock_runtime()
@@ -119,130 +119,7 @@ class BedrockService:
         self.smart_model = settings.BEDROCK_MODEL_ID      # Claude Sonnet 4.5 - deep analysis
 
     # ============================================================
-    # _anthropic_model_name — derive Anthropic API model from Bedrock ID
-    # e.g. "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    #   → "claude-sonnet-4-5-20250929"
-    # ============================================================
-    @staticmethod
-    def _anthropic_model_name(bedrock_model_id: str) -> str:
-        name = bedrock_model_id
-        for prefix in ("global.anthropic.", "anthropic."):
-            if name.startswith(prefix):
-                name = name[len(prefix):]
-                break
-        # Strip trailing "-v1:0" or similar version suffix
-        import re as _re
-        name = _re.sub(r'-v\d+:\d+$', '', name)
-        return name  # e.g. "claude-sonnet-4-5-20250929"
-
-    # ============================================================
-    # _call_anthropic_direct — direct api.anthropic.com call
-    # Accepts Bedrock Converse message/tool format, returns Bedrock-
-    # compatible response dict so callers need no changes.
-    # ============================================================
-    def _call_anthropic_direct(
-        self,
-        model_id: str,
-        messages: list,
-        system: str = "",
-        tools: list = None,
-        max_tokens: int = 2048,
-        temperature: float = 0.7,
-    ) -> dict:
-        import httpx as _httpx
-
-        # ---- Convert messages: Bedrock Converse → Anthropic ----
-        anthropic_messages = []
-        for msg in messages:
-            role = msg["role"]
-            content_blocks = []
-            for block in msg.get("content", []):
-                if "text" in block:
-                    content_blocks.append({"type": "text", "text": block["text"]})
-                elif "toolUse" in block:
-                    tu = block["toolUse"]
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tu["toolUseId"],
-                        "name": tu["name"],
-                        "input": tu["input"],
-                    })
-                elif "toolResult" in block:
-                    tr = block["toolResult"]
-                    result_content = tr.get("content", [])
-                    result_text = result_content[0]["text"] if result_content else ""
-                    content_blocks.append({
-                        "type": "tool_result",
-                        "tool_use_id": tr["toolUseId"],
-                        "content": result_text,
-                    })
-            anthropic_messages.append({"role": role, "content": content_blocks})
-
-        # ---- Convert tools: Bedrock toolSpec → Anthropic ----
-        anthropic_tools = None
-        if tools:
-            anthropic_tools = []
-            for t in tools:
-                spec = t.get("toolSpec", t)
-                anthropic_tools.append({
-                    "name": spec["name"],
-                    "description": spec.get("description", ""),
-                    "input_schema": spec.get("inputSchema", {}).get("json", {}),
-                })
-
-        body = {
-            "model": self._anthropic_model_name(model_id),
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": anthropic_messages,
-        }
-        if system:
-            body["system"] = system
-        if anthropic_tools:
-            body["tools"] = anthropic_tools
-
-        resp = _httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": settings.ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=body,
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        # ---- Convert response: Anthropic → Bedrock Converse format ----
-        content_out = []
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                content_out.append({"text": block["text"]})
-            elif block.get("type") == "tool_use":
-                content_out.append({
-                    "toolUse": {
-                        "toolUseId": block["id"],
-                        "name": block["name"],
-                        "input": block["input"],
-                    }
-                })
-
-        stop_map = {"end_turn": "end_turn", "tool_use": "tool_use", "max_tokens": "max_tokens"}
-        return {
-            "stopReason": stop_map.get(data.get("stop_reason", "end_turn"), "end_turn"),
-            "output": {
-                "message": {
-                    "role": "assistant",
-                    "content": content_out,
-                }
-            },
-            "usage": data.get("usage", {}),
-        }
-
-    # ============================================================
     # converse_raw — used by the voice pipeline (tool_use support)
-    # Priority: 1) Anthropic direct API  2) boto3 SigV4
     # ============================================================
 
     def converse_raw(
@@ -254,21 +131,11 @@ class BedrockService:
         max_tokens: int = 2048,
         temperature: float = 0.7,
     ) -> dict:
-        """Call Bedrock Converse API (or Anthropic direct API) and return raw response dict.
+        """Call Bedrock Converse API and return raw response dict.
 
         Messages must be in Bedrock Converse format.
         Returns dict with keys: stopReason, output.message.content, usage.
         """
-        # ---- Anthropic direct API (highest priority when key is set) ----
-        if settings.ANTHROPIC_API_KEY:
-            try:
-                return self._call_anthropic_direct(
-                    model_id, messages, system, tools, max_tokens, temperature
-                )
-            except Exception as e:
-                logger.error(f"[Anthropic direct] {e} — falling back to boto3")
-
-        # ---- boto3 SigV4 ----
         body: dict = {
             "messages": messages,
             "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
@@ -286,8 +153,7 @@ class BedrockService:
     def _invoke(self, model_id: str, messages: list,
                 system: str = "", max_tokens: int = 1024,
                 temperature: float = 0.7) -> str:
-        """Call any model. Returns raw text response.
-        Uses Anthropic direct API if ANTHROPIC_API_KEY is set, else Bedrock boto3."""
+        """Call any model. Returns raw text response via Bedrock Converse API."""
         # Convert to Bedrock Converse format first
         converse_messages = []
         for msg in messages:
@@ -317,17 +183,6 @@ class BedrockService:
             else:
                 converse_messages.append({"role": role, "content": [{"text": str(content)}]})
 
-        # ---- Anthropic direct API ----
-        if settings.ANTHROPIC_API_KEY:
-            try:
-                resp = self._call_anthropic_direct(
-                    model_id, converse_messages, system, None, max_tokens, temperature
-                )
-                return resp["output"]["message"]["content"][0]["text"]
-            except Exception as e:
-                logger.error(f"[Anthropic direct _invoke] {e} — falling back to boto3")
-
-        # ---- boto3 SigV4 ----
         try:
             kwargs = {
                 "modelId": model_id,

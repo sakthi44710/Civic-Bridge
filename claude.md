@@ -354,7 +354,7 @@ Claude Sonnet 4.5 calls these tools natively via Bedrock Converse `toolSpec`.
 ### BedrockService (`bedrock_service.py`)
 - **Purpose:** AWS Bedrock LLM gateway — Claude Sonnet 4.5 via Converse API
 - **Model:** `global.anthropic.claude-sonnet-4-5-20250929-v1:0` — set via `BEDROCK_MODEL_ID` in .env (global cross-region inference profile; required for Claude 4.x on Bedrock)
-- **Auth:** SigV4 (boto3) OR **Anthropic direct API** if `ANTHROPIC_API_KEY` is set (highest priority; bypasses AWS Bedrock billing)
+- **Auth:** SigV4 (boto3) via `client.converse()` Bedrock Converse API
 - **Key methods:** `chat()`, `converse_raw()`, `classify_document()`, `check_eligibility()`, `map_form_fields()`
 - **`converse_raw(model_id, messages, system, tools, max_tokens=300, temperature=0.3)`** — returns raw Converse API dict (stopReason, output.message.content). Used by ws.py for tool_use loop. Bearer-token path tries httpx first, falls back to boto3 SigV4.
 
@@ -466,11 +466,8 @@ CONVERSATIONS_TABLE=civicbridge-conversations
 DOCUMENTS_BUCKET=civicbridge-documents
 SCREENSHOTS_BUCKET=civicbridge-screenshots
 
-# AI — Claude Sonnet 4.5 via Bedrock (global inference profile)
+# AI — Claude Sonnet 4.5 via Bedrock (global cross-region inference profile)
 BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1:0
-# Direct Anthropic API key — fallback when Bedrock billing blocked
-# Get from: https://console.anthropic.com/
-ANTHROPIC_API_KEY=sk-ant-...
 # Bearer-token auth (use if IAM/SigV4 not working)
 BEDROCK_API_KEY=ABSK...
 BEDROCK_API_REGION=ap-south-1
