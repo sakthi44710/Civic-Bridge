@@ -5,7 +5,7 @@ TTS  → POST https://api.sarvam.ai/text-to-speech
 Auth → api-subscription-key header
 
 Language detection is automatic via saarika:v2.
-TTS: Ishita speaker (all languages), bulbul:v3, 8000 Hz.
+TTS: Ishita speaker (all languages), bulbul:v3, 22050 Hz.
 
 Uses a shared httpx.AsyncClient per-instance for connection keep-alive (faster calls).
 """
@@ -57,7 +57,7 @@ def _to_bcp47(lang: str) -> str:
 
 
 class SarvamService:
-    """Sarvam AI: STT (saarika:v2) + TTS (bulbul:v3, Ishita, 8000 Hz)."""
+    """Sarvam AI: STT (saarika:v2) + TTS (bulbul:v3, Ishita, 22050 Hz)."""
 
     def __init__(self) -> None:
         self._client: Optional[httpx.AsyncClient] = None
@@ -99,7 +99,7 @@ class SarvamService:
             return {"text": "", "language_code": "en-IN", "detected_language": "en-IN"}
 
         try:
-            form_data: dict = {"model": "saarika:v2"}
+            form_data: dict = {"model": "saarika:v2.5"}
             if hint_language:
                 form_data["language_code"] = _to_bcp47(hint_language)
 
@@ -157,7 +157,7 @@ class SarvamService:
                         "target_language_code": lang,
                         "speaker": speaker,
                         "model": "bulbul:v3",
-                        "speech_sample_rate": 8000,
+                        "speech_sample_rate": 22050,
                         "enable_preprocessing": True,
                     },
                 )

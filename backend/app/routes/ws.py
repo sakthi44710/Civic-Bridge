@@ -4,13 +4,13 @@ ws.py — WebSocket voice pipeline for CivicBridge
 Full pipeline (per voice turn):
   1. Receive binary WebM/Opus audio from frontend
   2. Sarvam saarika:v2 STT  →  text + detected language
-  3. Claude Haiku 4.5 (Bedrock) with tool_use loop
+  3. Mistral Large 3 (Bedrock Converse) with tool_use loop
        • Calls any of 11 tools if needed (search, form-fill, docs …)
   4. Sarvam bulbul:v2 TTS  →  WAV audio in detected language
   5. Send audio_response + transcript back to frontend
 
 Also handles:
-  • text_message  — typed input (skips STT, still uses Claude + TTS)
+  • text_message  — typed input (skips STT, still uses Mistral + TTS)
   • submit_otp / submit_captcha — relay to live Playwright browser
   • session_end — cleanup
 """
@@ -30,38 +30,108 @@ from ..services.dynamodb_service import db
 from ..services.form_agent_service import form_agent_service
 from ..services.sarvam_service import sarvam_service
 from ..services.scheme_service import scheme_service
+from ..services.web_search_service import web_search_service
 from ..utils.auth import decode_token_unsafe
+from ..utils.helpers import generate_id, now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# Voice assistant system prompt (Claude Haiku 4.5 — responses are spoken aloud)
+# Voice assistant system prompt (Mistral Large 3 — responses are spoken aloud)
 # ---------------------------------------------------------------------------
 
-VOICE_SYSTEM_PROMPT = """You are CivicBridge — a friendly multilingual voice AI assistant helping Indian citizens discover and apply for government welfare and scholarship schemes.
+VOICE_SYSTEM_PROMPT = """You are CivicBridge — a friendly multilingual voice AI assistant helping Indian citizens discover and apply for government welfare schemes, private scholarships, NGO programmes, and corporate CSR initiatives — ANY scheme, not just government.
 
 CRITICAL LANGUAGE RULE: ALWAYS respond in the EXACT same language the user speaks. Hindi → respond in Hindi. Tamil → Tamil. English → English. Support Hinglish, Tanglish and other code-mixing naturally.
 
 Your tools let you search for schemes, check eligibility, start and monitor live form filling, and manage user documents. Use them proactively when the user asks about schemes or wants to apply.
 
+DATA VERIFICATION (VERY IMPORTANT):
+- When the user asks about their details, documents, or profile, call get_verified_user_data. This returns ONE consolidated view merging profile data + all document extractions. Each field shows the single best value AND flags conflicts (e.g. profile says "Rahul" but Aadhaar says "Rahul Kumar").
+- Present the consolidated data to the user field by field. For any conflict, ask which value is correct.
+- When the user confirms or corrects a value, call update_user_data with the field name and correct value. This updates BOTH the profile AND all relevant document records automatically — so there is always ONE consistent value everywhere.
+- There is only ONE name, ONE address, ONE DOB, etc. in the system. Never present duplicate values — always show the merged result and resolve conflicts.
+- Example: "Your name is Sakthiprakash T and your address is 27 Middle Street, Kombakkam. Is that correct?" If user says the address is different, call update_user_data to fix it everywhere.
+- After verification, tell the user their data is now confirmed and ready for form filling.
+
+FORM FILLING & BROWSER AUTOMATION (CRITICAL):
+- When the user asks to fill a form, apply for a scheme, or visit any website:
+  1. Call web_search to find the correct official URL for the scheme
+  2. Call start_form_filling with the portal_url (or scheme_id for known schemes)
+  3. That is ALL you need to do. An autonomous browser agent takes over and handles ALL navigation, clicking, typing, scrolling, and form submission automatically.
+- The user does NOT need to give any directions. The browser agent works completely on its own.
+- NEVER refuse because a scheme is "private" or "not government". ALWAYS try.
+- After calling start_form_filling, tell the user: "I am opening the form now and will fill it automatically. Just sit back and watch the screen."
+- Do NOT call browser_read_screen, browser_click, browser_type etc. yourself after starting form filling — the autonomous agent handles all of that in the background.
+- For schemes in our database: call start_form_filling with scheme_id.
+- For PRIVATE schemes NOT in our database: call web_search first to find the URL, then call start_form_filling with portal_url.
+- If the agent encounters an OTP or CAPTCHA, the user will be prompted automatically.
+
 Voice response guidelines:
 - Keep responses SHORT — 1-3 sentences max (you are speaking aloud via TTS)
-- Do NOT use markdown, asterisks, bullet symbols, or any formatting characters
+- Do NOT use markdown formatting — no asterisks, bullets, dashes, or hashtags. Speak naturally.
 - Ask only ONE question at a time
-- Be warm, patient, and empathetic — many users have low digital literacy
+- Be warm, patient, and confident — many users have low digital literacy
 - When a tool returns results, summarise them conversationally
-- When starting form filling, confirm immediately and tell the user to watch the screen"""
+- When starting form filling, confirm immediately and tell the user to watch the screen
+- NEVER apologise or say you are having technical issues unless the user explicitly reports a problem
+- If a tool returns an error or no results, try an alternative approach or ask the user for more details. Do NOT say sorry or mention internal errors.
+- Be direct and helpful — give the user clear next steps"""
 
 # ---------------------------------------------------------------------------
-# Tool definitions for Claude Haiku 4.5 (Bedrock Converse toolSpec format)
+# Autonomous browser agent system prompt (runs as background task)
 # ---------------------------------------------------------------------------
 
-CLAUDE_TOOLS: List[Dict] = [
+AUTONOMOUS_AGENT_PROMPT = """You are an autonomous browser agent. You control a live browser to fill a government scheme application form for the user. The user is watching a live stream of the browser — they do NOT interact. You must do EVERYTHING yourself.
+
+CORE LOOP:
+1. Call browser_read_screen to understand the current page
+2. Decide what to do based on what you see
+3. Take ONE action (click, type, scroll, select, navigate)
+4. Call browser_read_screen again to verify the result
+5. Repeat until the form is submitted
+
+DECISION MAKING:
+- Landing/info page: Find and click "Apply Now", "Apply Online", "Register", "Get Started", or similar buttons/links
+- Registration/signup page: Fill the registration form with user data, then submit
+- Login page: Look for "New User", "Register", "Sign Up" links. If must login, use user's phone/email
+- Form page: Fill ALL visible fields with user data, then click Next/Submit/Continue
+- Success/confirmation page: Say FORM_COMPLETE
+- Error message: Read the error, fix it if possible, or try an alternative
+
+FILLING STRATEGY:
+- For text inputs: click the field first, then type the value
+- For dropdowns (<select>): read the available options with browser_read_screen, then use browser_select_option with the best matching option
+- For radio buttons/checkboxes: click the matching option using browser_click
+- For date fields: type in DD/MM/YYYY or DD-MM-YYYY format
+- After filling all visible fields, SCROLL DOWN to check for more fields below the fold
+- After all fields on a page are filled, find and click the Next/Submit/Continue button
+- For multi-page forms: fill current page completely, click Next, fill next page, repeat
+
+IMPORTANT RULES:
+- NEVER ask the user for help or directions. Figure it out yourself.
+- NEVER stop working unless you truly cannot proceed.
+- If you see an OTP input field on the page, say WAITING_FOR_OTP and stop.
+- If you see a CAPTCHA image or CAPTCHA input field, first scroll down so the CAPTCHA image is visible on screen, then say WAITING_FOR_CAPTCHA and stop.
+- Always scroll down after filling visible fields to check for hidden content.
+- If a click does not work, try alternative selectors or text-based clicking.
+- If a page seems to be loading, call browser_read_screen again after a moment.
+- When the form is submitted successfully or you truly cannot proceed, say FORM_COMPLETE.
+- Be persistent — try multiple approaches before giving up.
+
+USER DATA (use these values to fill form fields):
+{user_data}"""
+
+# ---------------------------------------------------------------------------
+# Tool definitions (Bedrock Converse toolSpec format — works with any model)
+# ---------------------------------------------------------------------------
+
+MISTRAL_TOOLS: List[Dict] = [
     {
         "toolSpec": {
             "name": "search_schemes",
-            "description": "Search for Indian government welfare and scholarship schemes by keyword or category.",
+            "description": "Search for government welfare schemes, private scholarships, and other programmes by keyword or category. Also use this to find scheme IDs.",
             "inputSchema": {
                 "json": {
                     "type": "object",
@@ -80,14 +150,14 @@ CLAUDE_TOOLS: List[Dict] = [
     {
         "toolSpec": {
             "name": "match_schemes",
-            "description": "Automatically match government schemes to the current user's profile.",
+            "description": "Automatically match eligible schemes (government, private, scholarships, NGO) to the current user's profile.",
             "inputSchema": {"json": {"type": "object", "properties": {}}},
         }
     },
     {
         "toolSpec": {
             "name": "check_eligibility",
-            "description": "Check if the user is eligible for a specific government scheme.",
+            "description": "Check if the user is eligible for a specific scheme (government or private).",
             "inputSchema": {
                 "json": {
                     "type": "object",
@@ -102,14 +172,15 @@ CLAUDE_TOOLS: List[Dict] = [
     {
         "toolSpec": {
             "name": "start_form_filling",
-            "description": "Open a live browser and start automatically filling the application form. User can watch in real time.",
+            "description": "Open a live browser and start automatically filling an application form. Works for government portals AND private scheme websites. Provide scheme_id for known schemes, or portal_url for any external website.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
-                        "scheme_id": {"type": "string"}
+                        "scheme_id": {"type": "string", "description": "Scheme ID from our database (e.g. HEALTH001). Optional if portal_url is provided."},
+                        "portal_url": {"type": "string", "description": "Direct URL of the application form or scheme website. Use this for private schemes not in our database."},
+                        "scheme_name": {"type": "string", "description": "Human-readable name of the scheme (for display purposes)."}
                     },
-                    "required": ["scheme_id"],
                 }
             },
         }
@@ -153,16 +224,25 @@ CLAUDE_TOOLS: List[Dict] = [
     },
     {
         "toolSpec": {
-            "name": "get_user_profile",
-            "description": "Get the user's profile (name, age, state, income, etc.).",
+            "name": "get_verified_user_data",
+            "description": "Get a single consolidated view of the user's data — merges profile details with all document extractions. Shows one value per field and flags any conflicts between sources. Use this when the user asks about their details, documents, or profile.",
             "inputSchema": {"json": {"type": "object", "properties": {}}},
         }
     },
     {
         "toolSpec": {
-            "name": "get_user_documents",
-            "description": "List documents the user has uploaded (Aadhaar, PAN, etc.).",
-            "inputSchema": {"json": {"type": "object", "properties": {}}},
+            "name": "update_user_data",
+            "description": "Update a user detail everywhere — profile AND all document records that contain this field. Use when user confirms or corrects a value. This ensures ONE consistent value across the entire system.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "field_name": {"type": "string", "description": "Field to update: name, dob, gender, address, state, district, pincode, annual_income, occupation, category, aadhaar_number, pan_number, father_name, mother_name, email, phone, bank_account, ifsc_code, bank_name, education_level, or any other field"},
+                        "correct_value": {"type": "string", "description": "The correct value confirmed by the user"},
+                    },
+                    "required": ["field_name", "correct_value"],
+                }
+            },
         }
     },
     {
@@ -176,6 +256,129 @@ CLAUDE_TOOLS: List[Dict] = [
                     "required": ["scheme_id"],
                 }
             },
+        }
+    },
+    # ── Browser control tools (AI can freely operate the live browser) ──
+    {
+        "toolSpec": {
+            "name": "web_search",
+            "description": "Search the web using DuckDuckGo. Use this to find official URLs, verify links, or look up scheme information before navigating the browser.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                    },
+                    "required": ["query"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_navigate",
+            "description": "Navigate the live browser to a URL. Use web_search first to verify the URL.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Full URL to navigate to (must start with http:// or https://)"},
+                    },
+                    "required": ["url"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_read_screen",
+            "description": "Analyze what is currently visible on the live browser. Returns page title, URL, all form fields, buttons, links, and text content. ALWAYS call this after navigating or clicking to understand the current page state.",
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_click",
+            "description": "Click on an element in the live browser. Provide EITHER a CSS selector OR the visible text of the element.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "selector": {"type": "string", "description": "CSS selector (e.g. '#submit-btn', '.next-button', '[name=email]')"},
+                        "text": {"type": "string", "description": "Visible text of the element to click (e.g. 'Submit', 'Next', 'Login')"},
+                    },
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_type",
+            "description": "Type text into an input field. If selector is given, clicks that field first. Otherwise types into the currently focused element.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Text to type"},
+                        "selector": {"type": "string", "description": "CSS selector of the input field (optional)"},
+                        "clear_first": {"type": "boolean", "description": "Clear field before typing (default: true)"},
+                    },
+                    "required": ["text"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_scroll",
+            "description": "Scroll the page up or down in the live browser.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "direction": {"type": "string", "description": "'up' or 'down' (default: down)"},
+                        "amount": {"type": "integer", "description": "Pixels to scroll (default: 400)"},
+                    },
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_press_key",
+            "description": "Press a keyboard key in the live browser (Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, Space, etc).",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "Key name: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, Space, etc."},
+                    },
+                    "required": ["key"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_select_option",
+            "description": "Select an option from a dropdown (<select>) element.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "selector": {"type": "string", "description": "CSS selector of the <select> element"},
+                        "value": {"type": "string", "description": "Option value or visible text to select"},
+                    },
+                    "required": ["selector", "value"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "browser_back",
+            "description": "Go back to the previous page in the live browser.",
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
         }
     },
 ]
@@ -232,10 +435,29 @@ async def voice_websocket(websocket: WebSocket, token: str):
 
             if msg_type == "session_start":
                 session_state["language"] = data.get("language", "en-IN")
-                session_state["conversation_id"] = data.get("conversation_id")
+                conv_id = data.get("conversation_id") or generate_id()
+                session_state["conversation_id"] = conv_id
+
+                # Load existing conversation from DB if resuming
+                try:
+                    existing = db.get_conversation(user_id, conv_id)
+                    if existing and existing.get("messages"):
+                        saved_msgs = existing["messages"]
+                        if isinstance(saved_msgs, str):
+                            saved_msgs = _json.loads(saved_msgs)
+                        # Rebuild Bedrock-format history from saved messages
+                        for m in saved_msgs:
+                            session_state["conversation_history"].append({
+                                "role": m["role"],
+                                "content": [{"text": m.get("content", "")}],
+                            })
+                        logger.info(f"[WS] Resumed conversation {conv_id} with {len(saved_msgs)} messages")
+                except Exception as e:
+                    logger.warning(f"[WS] Could not load conversation {conv_id}: {e}")
+
                 await websocket.send_json({
                     "type": "session_started",
-                    "conversation_id": session_state["conversation_id"],
+                    "conversation_id": conv_id,
                     "novnc_ready": True,
                     "novnc_path": "/vnc.html?autoconnect=true&resize=scale",
                 })
@@ -272,12 +494,56 @@ async def voice_websocket(websocket: WebSocket, token: str):
 
 
 # ---------------------------------------------------------------------------
-# Audio handler: Sarvam STT → Claude → Sarvam TTS
+# Persist a single user↔assistant turn to DynamoDB
+# ---------------------------------------------------------------------------
+
+def _save_turn_to_db(session_state: Dict, user_text: str, assistant_text: str, language: str) -> None:
+    """Save the latest turn to DynamoDB conversation table (fire-and-forget)."""
+    user_id = session_state.get("user_id")
+    conv_id = session_state.get("conversation_id")
+    if not user_id or not conv_id:
+        return
+
+    new_messages = [
+        {"role": "user", "content": user_text, "timestamp": now_iso()},
+        {"role": "assistant", "content": assistant_text, "timestamp": now_iso()},
+    ]
+
+    try:
+        existing = db.get_conversation(user_id, conv_id)
+        if existing:
+            msgs = existing.get("messages", [])
+            if isinstance(msgs, str):
+                try:
+                    msgs = _json.loads(msgs)
+                except Exception:
+                    msgs = []
+            msgs.extend(new_messages)
+            db.update_conversation(user_id, conv_id, {
+                "messages": msgs,
+                "language": language,
+                "source": "voice",
+            })
+        else:
+            db.save_conversation({
+                "user_id": user_id,
+                "conversation_id": conv_id,
+                "messages": new_messages,
+                "language": language,
+                "source": "voice",
+                "created_at": now_iso(),
+            })
+    except Exception as e:
+        logger.warning(f"[WS] Could not save conversation turn: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Audio handler: Sarvam STT → Mistral → Sarvam TTS
 # ---------------------------------------------------------------------------
 
 
 async def _handle_audio(audio_bytes: bytes, session_state: Dict, websocket: WebSocket) -> None:
-    """Full voice turn: Sarvam STT → Claude Haiku 4.5 (tool_use) → Sarvam TTS."""
+    """Full voice turn: Sarvam STT → Mistral Large 3 (tool_use) → Sarvam TTS."""
     await websocket.send_json({"type": "status", "status": "processing"})
 
     hint = session_state.get("language", "en-IN")
@@ -295,7 +561,7 @@ async def _handle_audio(audio_bytes: bytes, session_state: Dict, websocket: WebS
 
 
 async def _handle_text(text: str, session_state: Dict, websocket: WebSocket) -> None:
-    """Typed text input — skip STT, run Claude + TTS."""
+    """Typed text input — skip STT, run Mistral + TTS."""
     language = session_state.get("language", "en-IN")
     await websocket.send_json({"type": "transcript", "role": "user", "text": text, "language": language})
     await _process_and_respond(text, language, session_state, websocket)
@@ -304,8 +570,8 @@ async def _handle_text(text: str, session_state: Dict, websocket: WebSocket) -> 
 async def _process_and_respond(
     user_text: str, language: str, session_state: Dict, websocket: WebSocket
 ) -> None:
-    """Claude Haiku 4.5 with tool_use → sentence-streaming Sarvam TTS → send audio."""
-    response_text = await _run_claude_with_tools(user_text, language, session_state, websocket)
+    """Mistral Large 3 with tool_use → sentence-streaming Sarvam TTS → send audio."""
+    response_text = await _run_mistral_with_tools(user_text, language, session_state, websocket)
 
     if not response_text:
         response_text = "Sorry, I could not process that. Please try again."
@@ -315,7 +581,10 @@ async def _process_and_respond(
         "type": "transcript", "role": "assistant", "text": response_text, "language": language
     })
 
-    # Stream TTS sentence by sentence — first sentence plays ~400ms after Claude responds
+    # Persist conversation to DynamoDB
+    _save_turn_to_db(session_state, user_text, response_text, language)
+
+    # Stream TTS sentence by sentence — first sentence plays ~400ms after Mistral responds
     got_audio = False
     async for sentence, wav_bytes in sarvam_service.text_to_speech_sentences(response_text, language):
         await websocket.send_json({
@@ -341,14 +610,14 @@ async def _process_and_respond(
 
 
 # ---------------------------------------------------------------------------
-# Claude Haiku 4.5 tool_use conversation loop
+# Mistral Large 3 tool_use conversation loop
 # ---------------------------------------------------------------------------
 
 
-async def _run_claude_with_tools(
+async def _run_mistral_with_tools(
     user_text: str, language: str, session_state: Dict, websocket: WebSocket
 ) -> str:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     history: List[Dict] = session_state.setdefault("conversation_history", [])
 
     messages = list(history[-20:])
@@ -357,7 +626,7 @@ async def _run_claude_with_tools(
     # Build doc context once per session (cache to avoid repeated DB calls)
     if "_doc_context" not in session_state:
         try:
-            ctx = await document_service.get_user_document_context(session_state["user_id"])
+            ctx = document_service.get_user_document_context(session_state["user_id"])
             session_state["_doc_context"] = ctx or ""
         except Exception:
             session_state["_doc_context"] = ""
@@ -370,22 +639,23 @@ async def _run_claude_with_tools(
     if doc_ctx:
         system += f"\n\nUser documents context:\n{doc_ctx}"
 
-    for _ in range(6):  # max 6 tool-use iterations
+    for _ in range(15):  # max 15 tool-use iterations (browser control needs many steps)
         try:
+            _msgs_snapshot = list(messages)  # snapshot to avoid stale lambda closure
             response = await loop.run_in_executor(
                 None,
                 lambda: bedrock_service.converse_raw(
                     model_id=settings.BEDROCK_MODEL_ID,
-                    messages=messages,
+                    messages=_msgs_snapshot,
                     system=system,
-                    tools=CLAUDE_TOOLS,
-                    max_tokens=300,    # Short — voice responses must be concise
+                    tools=MISTRAL_TOOLS,
+                    max_tokens=512,    # Enough for tool calls + short voice text
                     temperature=0.3,   # Low = fast, consistent
                 ),
             )
         except Exception as e:
-            logger.error(f"[Claude] converse_raw error: {e}")
-            return "I had trouble connecting to the AI. Please try again."
+            logger.error(f"[Mistral] converse_raw error: {e}")
+            return "I could not process that right now. Could you please repeat your question?"
 
         stop_reason = response.get("stopReason", "end_turn")
         output_content = response.get("output", {}).get("message", {}).get("content", [])
@@ -393,7 +663,7 @@ async def _run_claude_with_tools(
         if stop_reason in ("end_turn", "max_tokens"):
             final_text = " ".join(c.get("text", "") for c in output_content if "text" in c).strip()
             history.append({"role": "user", "content": [{"text": user_text}]})
-            history.append({"role": "assistant", "content": output_content})
+            history.append({"role": "assistant", "content": output_content if output_content else [{"text": final_text}]})
             if len(history) > 20:
                 session_state["conversation_history"] = history[-20:]
             return final_text
@@ -415,7 +685,7 @@ async def _run_claude_with_tools(
 
         break
 
-    return "I encountered an issue. Please try asking again."
+    return "I could not find that information right now. Can you tell me more about what you need?"
 
 
 # ---------------------------------------------------------------------------
@@ -426,10 +696,11 @@ async def _run_claude_with_tools(
 async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket: WebSocket) -> str:
     user_id = session_state["user_id"]
     profile = session_state["user_profile"]
+    logger.info(f"[Tool] Executing: {tool} | params={params} | user={user_id}")
 
     try:
         if tool == "search_schemes":
-            results = await scheme_service.search_schemes(
+            results = scheme_service.search_schemes(
                 query=params.get("query", ""), category=params.get("category"), state=profile.get("state")
             )
             if not results:
@@ -437,7 +708,7 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             return f"Found {len(results)} schemes: {', '.join(s.get('name','') for s in results[:5])}"
 
         elif tool == "match_schemes":
-            results = await scheme_service.match_schemes(profile)
+            results = scheme_service.match_schemes(profile)
             if not results:
                 return "No matching schemes found."
             return "Top matches: " + "; ".join(
@@ -445,23 +716,40 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             )
 
         elif tool == "check_eligibility":
-            result = await scheme_service.check_eligibility(profile, params.get("scheme_id"))
+            result = scheme_service.check_eligibility(profile, params.get("scheme_id"))
             if result.get("eligible"):
                 return f"Eligible. Score: {int(result.get('match_score',0)*100)}%. {result.get('ai_analysis','')}"
             return f"Not eligible. Unmet: {', '.join(result.get('unmet_criteria',[]))}"
 
         elif tool == "start_form_filling":
-            scheme_id = params.get("scheme_id")
-            scheme = await scheme_service.get_scheme(scheme_id)
-            if not scheme:
-                return f"Scheme '{scheme_id}' not found."
-            portal_url = scheme.get("portal_url") or scheme.get("application_url")
-            if not portal_url:
-                return "No portal URL for this scheme."
-            doc_map = await document_service.get_document_map_for_form(user_id)
-            user_data = {**profile, **doc_map}
+            scheme_id = params.get("scheme_id", "")
+            direct_url = params.get("portal_url", "")
+            scheme_name = params.get("scheme_name", "")
+            logger.info(f"[Tool:start_form_filling] scheme_id={scheme_id}, portal_url={direct_url}, user_id={user_id}")
 
-            # Fire-and-forget: browser opens in background so Claude responds immediately
+            # Resolve portal URL: try DB scheme first, then direct URL
+            scheme = scheme_service.get_scheme(scheme_id) if scheme_id else None
+            if scheme:
+                portal_url = scheme.get("portal_url") or scheme.get("application_url") or direct_url
+                scheme_name = scheme_name or scheme.get("name", scheme_id)
+            elif direct_url:
+                # Private/external scheme — use the URL the AI provided
+                portal_url = direct_url
+                scheme_id = scheme_id or "EXTERNAL"
+                scheme_name = scheme_name or "External Scheme"
+            else:
+                logger.warning(f"[Tool:start_form_filling] No scheme found and no URL provided")
+                return "Could not find that scheme. Please provide either a scheme_id from search results or a portal_url for the scheme website."
+
+            if not portal_url:
+                logger.warning(f"[Tool:start_form_filling] No portal URL resolved for {scheme_id}")
+                return "No portal URL available for this scheme. Please provide the application website URL."
+
+            doc_map = document_service.get_document_map_for_form(user_id)
+            user_data = {**profile, **doc_map}
+            logger.info(f"[Tool:start_form_filling] Launching browser for {scheme_name}, portal={portal_url}, data_keys={list(user_data.keys())}")
+
+            # Fire-and-forget: browser opens in background so Mistral responds immediately
             asyncio.create_task(_start_form_background(
                 user_id=user_id,
                 scheme_id=scheme_id,
@@ -469,12 +757,13 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
                 user_data=user_data,
                 portal_url=portal_url,
                 websocket=websocket,
+                session_state=session_state,
             ))
             await websocket.send_json({
                 "type": "form_started", "scheme_id": scheme_id,
                 "session_id": f"sess_{user_id}_{scheme_id}", "show_novnc": True,
             })
-            return f"Opening {scheme.get('name')} in the live browser now. Watch the form being filled on screen."
+            return f"Opening {scheme_name} in the live browser now. Watch the form being filled on screen."
 
         elif tool == "get_form_status":
             s = form_agent_service.get_session(user_id)
@@ -499,28 +788,242 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             await websocket.send_json({"type": "form_stopped"})
             return "Form session closed."
 
-        elif tool == "get_user_profile":
-            return (f"Name: {profile.get('name','N/A')}, Age: {profile.get('age','N/A')}, "
-                    f"State: {profile.get('state','N/A')}, Income: {profile.get('annual_income','N/A')}")
+        elif tool == "get_verified_user_data":
+            # Merge profile + all document extracted data into one consolidated view
+            merged: Dict[str, Dict] = {}  # field -> {"value": best, "sources": [...], "conflict": bool}
 
-        elif tool == "get_user_documents":
-            docs = await document_service.get_user_documents(user_id)
-            if not docs:
-                return "No documents uploaded."
-            return "Uploaded: " + ", ".join(d.get("document_type", d.get("filename","?")) for d in docs)
+            # Profile fields mapping (DB key -> display label)
+            PROFILE_KEYS = {
+                "name": "name", "dob": "date_of_birth", "gender": "gender",
+                "state": "state", "district": "district", "pincode": "pincode",
+                "address": "address", "annual_income": "annual_income",
+                "occupation": "occupation", "category": "category",
+                "education_level": "education_level", "email": "email",
+                "phone_number": "phone", "aadhaar_number": "aadhaar_number",
+                "pan_number": "pan_number", "bank_name": "bank_name",
+                "bank_account": "bank_account", "ifsc_code": "ifsc_code",
+            }
+            for db_key, field in PROFILE_KEYS.items():
+                val = profile.get(db_key)
+                if val:
+                    merged[field] = {"value": str(val), "sources": ["profile"], "conflict": False}
+
+            # Document extracted data
+            docs = document_service.get_user_documents(user_id)
+            doc_types_list = []
+            for d in docs:
+                doc_type = d.get("document_type", "unknown")
+                doc_types_list.append(doc_type)
+                extracted = d.get("extracted_data", {})
+                if not isinstance(extracted, dict):
+                    continue
+                for k, v in extracted.items():
+                    if isinstance(v, dict):
+                        for sk, sv in v.items():
+                            if sv:
+                                self_key = sk.lower().replace(" ", "_")
+                                sv_str = str(sv).strip()
+                                if self_key in merged:
+                                    existing = merged[self_key]["value"].strip().lower()
+                                    if sv_str.lower() != existing:
+                                        merged[self_key]["conflict"] = True
+                                        if doc_type not in merged[self_key]["sources"]:
+                                            merged[self_key]["sources"].append(doc_type)
+                                            merged[self_key]["value"] = merged[self_key]["value"] + f" [BUT {doc_type} says: {sv_str}]"
+                                    else:
+                                        if doc_type not in merged[self_key]["sources"]:
+                                            merged[self_key]["sources"].append(doc_type)
+                                else:
+                                    merged[self_key] = {"value": sv_str, "sources": [doc_type], "conflict": False}
+                    elif v:
+                        norm_key = k.lower().replace(" ", "_")
+                        v_str = str(v).strip()
+                        if norm_key in merged:
+                            existing = merged[norm_key]["value"].split(" [BUT")[0].strip().lower()
+                            if v_str.lower() != existing:
+                                merged[norm_key]["conflict"] = True
+                                if doc_type not in merged[norm_key]["sources"]:
+                                    merged[norm_key]["sources"].append(doc_type)
+                                    merged[norm_key]["value"] = merged[norm_key]["value"] + f" [BUT {doc_type} says: {v_str}]"
+                            else:
+                                if doc_type not in merged[norm_key]["sources"]:
+                                    merged[norm_key]["sources"].append(doc_type)
+                        else:
+                            merged[norm_key] = {"value": v_str, "sources": [doc_type], "conflict": False}
+
+            if not merged:
+                return "No data found. Profile is empty and no documents uploaded."
+
+            lines = []
+            lines.append(f"Uploaded documents: {', '.join(doc_types_list) if doc_types_list else 'none'}")
+            lines.append("")
+            conflicts = []
+            for field, info in merged.items():
+                label = field.replace("_", " ").title()
+                src = " + ".join(info["sources"])
+                if info["conflict"]:
+                    lines.append(f"CONFLICT {label}: {info['value']} (from {src})")
+                    conflicts.append(label)
+                else:
+                    lines.append(f"{label}: {info['value']} (from {src})")
+            if conflicts:
+                lines.append(f"\nCONFLICTS FOUND in: {', '.join(conflicts)}. Ask the user which value is correct for each.")
+            else:
+                lines.append("\nNo conflicts found. Ask the user to confirm these details are correct.")
+            return "\n".join(lines)
+
+        elif tool == "update_user_data":
+            field_name = params.get("field_name", "").lower().replace(" ", "_")
+            correct_value = params.get("correct_value", "")
+            if not field_name or not correct_value:
+                return "Need field_name and correct_value."
+
+            # 1. Update profile if field exists there
+            PROFILE_FIELD_MAP = {
+                "name": "name", "date_of_birth": "dob", "dob": "dob",
+                "gender": "gender", "state": "state", "district": "district",
+                "pincode": "pincode", "address": "address",
+                "annual_income": "annual_income", "occupation": "occupation",
+                "category": "category", "education_level": "education_level",
+                "email": "email", "phone": "phone_number",
+                "aadhaar_number": "aadhaar_number", "pan_number": "pan_number",
+                "bank_name": "bank_name", "bank_account": "bank_account",
+                "ifsc_code": "ifsc_code", "father_name": "father_name",
+                "mother_name": "mother_name",
+            }
+            profile_key = PROFILE_FIELD_MAP.get(field_name)
+            if profile_key:
+                val = int(correct_value) if profile_key == "annual_income" and correct_value.isdigit() else correct_value
+                try:
+                    db.update_user(user_id, {profile_key: val})
+                except Exception as e:
+                    logger.warning(f"Profile update for {profile_key}: {e}")
+                # Also update in-memory session profile
+                profile[profile_key] = val
+
+            # 2. Update extracted_data in ALL documents that contain this field
+            docs = document_service.get_user_documents(user_id)
+            updated_docs = 0
+            for doc in docs:
+                extracted = doc.get("extracted_data", {})
+                if not isinstance(extracted, dict):
+                    continue
+                changed = False
+                # Top-level field
+                if field_name in extracted:
+                    extracted[field_name] = correct_value
+                    changed = True
+                # Nested field
+                for k, v in extracted.items():
+                    if isinstance(v, dict) and field_name in v:
+                        v[field_name] = correct_value
+                        changed = True
+                if changed:
+                    db.update_document(user_id, doc["document_id"], {"extracted_data": extracted})
+                    updated_docs += 1
+
+            return f"Updated '{field_name}' to '{correct_value}' in profile{f' and {updated_docs} document(s)' if updated_docs else ''}."
 
         elif tool == "check_documents":
-            result = await document_service.check_required_documents(user_id, params.get("scheme_id"))
+            scheme_id = params.get("scheme_id", "")
+            scheme = scheme_service.get_scheme(scheme_id)
+            if not scheme:
+                return f"Scheme '{scheme_id}' not found."
+            required_docs = scheme.get("required_documents", [])
+            if not required_docs:
+                return "This scheme has no specific document requirements listed."
+            result = document_service.check_required_documents(user_id, required_docs)
             if result.get("all_available"):
                 return "All required documents available."
-            return f"Missing: {', '.join(result.get('missing',[]))}"
+            return f"Available: {', '.join(result.get('available',[]))}. Missing: {', '.join(result.get('missing',[]))}"
+
+        # ── Browser control tools ────────────────────────────────
+        elif tool == "web_search":
+            query = params.get("query", "")
+            results = await web_search_service.search(query, max_results=8)
+            if not results:
+                return "No search results found."
+            lines = []
+            for i, r in enumerate(results[:8], 1):
+                title = r.get("title", "")
+                url = r.get("href", "")
+                snippet = r.get("body", "")[:120]
+                lines.append(f"{i}. {title}\n   URL: {url}\n   {snippet}")
+            return "\n".join(lines)
+
+        elif tool == "browser_navigate":
+            result = await form_agent_service.browser_action(user_id, "navigate", params)
+            if result.get("success"):
+                return f"Navigated to {result.get('url')}. Title: {result.get('title')}. Call browser_read_screen to see the page."
+            return f"Navigation failed: {result.get('error')}"
+
+        elif tool == "browser_read_screen":
+            result = await form_agent_service.browser_action(user_id, "read_screen", {})
+            if not result.get("success"):
+                return f"Could not read screen: {result.get('error')}"
+            lines = [f"Page: {result.get('url', '?')}", f"Title: {result.get('title', '?')}"]
+            if result.get("headings"):
+                lines.append(f"Headings: {' | '.join(result['headings'][:8])}")
+            if result.get("inputs"):
+                lines.append("Input fields:")
+                for inp in result["inputs"]:
+                    val = f", value='{inp['value']}'" if inp.get("value") else ""
+                    lines.append(f"  - {inp.get('label','')} [{inp.get('selector','')}] ({inp.get('type','text')}{val})")
+            if result.get("selects"):
+                lines.append("Dropdowns:")
+                for sel in result["selects"]:
+                    opts = ', '.join(sel.get('options', [])[:6])
+                    lines.append(f"  - {sel.get('label','')} [{sel.get('selector','')}] (selected: {sel.get('selected','')}, options: {opts})")
+            if result.get("buttons"):
+                lines.append("Buttons: " + ", ".join(f"{b['text']}" + (f" [{b['selector']}]" if b.get('selector') else "") for b in result["buttons"]))
+            if result.get("links"):
+                lines.append("Links: " + ", ".join(f"{l['text']}" for l in result["links"][:10]))
+            if result.get("text_content"):
+                lines.append(f"Page text (summary): {result['text_content'][:800]}")
+            return "\n".join(lines)
+
+        elif tool == "browser_click":
+            result = await form_agent_service.browser_action(user_id, "click", params)
+            if result.get("success"):
+                return f"Clicked successfully. Call browser_read_screen to see the updated page."
+            return f"Click failed: {result.get('error')}"
+
+        elif tool == "browser_type":
+            result = await form_agent_service.browser_action(user_id, "type", params)
+            if result.get("success"):
+                return f"Typed '{result.get('typed', '')}' successfully."
+            return f"Type failed: {result.get('error')}"
+
+        elif tool == "browser_scroll":
+            result = await form_agent_service.browser_action(user_id, "scroll", params)
+            if result.get("success"):
+                return f"Scrolled {result.get('scrolled', 'down')} {result.get('pixels', 400)}px. Call browser_read_screen to see what is now visible."
+            return f"Scroll failed: {result.get('error')}"
+
+        elif tool == "browser_press_key":
+            result = await form_agent_service.browser_action(user_id, "press_key", params)
+            if result.get("success"):
+                return f"Pressed {result.get('key', '')} key."
+            return f"Key press failed: {result.get('error')}"
+
+        elif tool == "browser_select_option":
+            result = await form_agent_service.browser_action(user_id, "select_option", params)
+            if result.get("success"):
+                return f"Selected '{result.get('selected', '')}' in dropdown."
+            return f"Select failed: {result.get('error')}"
+
+        elif tool == "browser_back":
+            result = await form_agent_service.browser_action(user_id, "back", {})
+            if result.get("success"):
+                return f"Went back. Now at: {result.get('url')}. Call browser_read_screen to see the page."
+            return f"Back failed: {result.get('error')}"
 
         else:
             return f"Unknown tool: {tool}"
 
     except Exception as e:
         logger.error(f"[Tool:{tool}] {e}", exc_info=True)
-        return f"Error running {tool}: {e}"
+        return f"Tool {tool} could not complete the request right now. Suggest an alternative approach to the user or ask for more details."
 
 
 # ---------------------------------------------------------------------------
@@ -535,8 +1038,10 @@ async def _start_form_background(
     user_data: dict,
     portal_url: str,
     websocket: WebSocket,
+    session_state: Dict,
 ) -> None:
-    """Launch browser + start form session in background so Claude responds immediately."""
+    """Launch browser + start form session, then hand off to autonomous agent."""
+    logger.info(f"[WS] _start_form_background starting for user={user_id}, scheme={scheme_id}, portal={portal_url}")
     try:
         await form_agent_service.start_session(
             user_id=user_id,
@@ -546,9 +1051,218 @@ async def _start_form_background(
             portal_url=portal_url,
             websocket=websocket,
         )
+        logger.info(f"[WS] Form session started, launching autonomous agent for user={user_id}")
+        # Hand off to autonomous browser agent — it navigates, fills, and submits on its own
+        asyncio.create_task(_run_autonomous_browser_agent(
+            user_id=user_id,
+            session_state=session_state,
+            websocket=websocket,
+            user_data=user_data,
+        ))
     except Exception as e:
-        logger.error(f"[WS] Form background start error: {e}")
+        logger.error(f"[WS] Form background start error: {e}", exc_info=True)
         try:
             await websocket.send_json({"type": "error", "message": f"Could not open browser: {e}"})
         except Exception:
             pass
+
+
+async def _run_autonomous_browser_agent(
+    user_id: str,
+    session_state: Dict,
+    websocket: WebSocket,
+    user_data: Dict,
+) -> None:
+    """
+    Autonomous browser agent — reads the screen, decides actions, fills forms,
+    and submits without any user direction. Runs as a background asyncio task.
+    """
+    await asyncio.sleep(3)  # let the browser fully load
+
+    session = form_agent_service.get_session(user_id)
+    if not session or not session._page:
+        logger.warning("[AutoAgent] No active session after wait, aborting")
+        return
+
+    language = session_state.get("language", "en-IN")
+    loop = asyncio.get_running_loop()
+
+    # Build user data string for the agent prompt
+    data_lines = []
+    for k, v in user_data.items():
+        if v and str(v).strip():
+            data_lines.append(f"  {k}: {v}")
+    user_data_str = "\n".join(data_lines) if data_lines else "  No user data available"
+
+    system = AUTONOMOUS_AGENT_PROMPT.replace("{user_data}", user_data_str)
+
+    # Only browser-control tools for the agent
+    browser_tools = [t for t in MISTRAL_TOOLS if t["toolSpec"]["name"] in {
+        "browser_read_screen", "browser_click", "browser_type", "browser_scroll",
+        "browser_press_key", "browser_select_option", "browser_navigate", "browser_back",
+        "web_search",
+    }]
+
+    messages: List[Dict] = [{
+        "role": "user",
+        "content": [{"text": (
+            "The browser is open on the scheme page. "
+            "Read the screen and start working. Find the application form, "
+            "fill every field with the user data, and submit it. "
+            "Work completely on your own — do not ask me anything."
+        )}],
+    }]
+
+    logger.info(f"[AutoAgent] Starting for user={user_id}")
+
+    try:
+        for outer_round in range(25):
+            session = form_agent_service.get_session(user_id)
+            if not session or not session._page:
+                logger.info("[AutoAgent] Session gone, stopping")
+                break
+
+            # Inner tool-chain loop (Mistral may chain several tool calls)
+            for _inner in range(12):
+                try:
+                    _snap = list(messages[-30:])
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda _m=_snap: bedrock_service.converse_raw(
+                            model_id=settings.BEDROCK_MODEL_ID,
+                            messages=_m,
+                            system=system,
+                            tools=browser_tools,
+                            max_tokens=512,
+                            temperature=0.2,
+                        ),
+                    )
+                except Exception as e:
+                    logger.error(f"[AutoAgent] Mistral error: {e}")
+                    return
+
+                stop_reason = response.get("stopReason", "end_turn")
+                output_content = response.get("output", {}).get("message", {}).get("content", [])
+
+                if stop_reason == "tool_use":
+                    messages.append({"role": "assistant", "content": output_content})
+                    tool_results = []
+                    for tu in [c["toolUse"] for c in output_content if "toolUse" in c]:
+                        result = await _execute_tool(
+                            tu["name"], tu.get("input", {}), session_state, websocket
+                        )
+                        tool_results.append({
+                            "toolResult": {
+                                "toolUseId": tu["toolUseId"],
+                                "content": [{"text": result}],
+                            }
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                    continue  # let Mistral chain the next tool call
+
+                # end_turn / max_tokens — Mistral produced text
+                text = " ".join(
+                    c.get("text", "") for c in output_content if "text" in c
+                ).strip()
+                messages.append({
+                    "role": "assistant",
+                    "content": output_content if output_content else [{"text": text}],
+                })
+
+                # Send progress update to user
+                if text:
+                    try:
+                        await websocket.send_json({
+                            "type": "transcript", "role": "assistant",
+                            "text": text, "language": language,
+                        })
+                    except Exception:
+                        return  # WebSocket closed
+
+                text_lower = (text or "").lower()
+
+                # OTP detected — trigger modal and wait
+                if "waiting_for_otp" in text_lower:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        session.waiting_for = "otp"
+                        session.status = "waiting_otp"
+                        try:
+                            await websocket.send_json({
+                                "type": "form_update",
+                                "data": {
+                                    "status": "waiting_otp",
+                                    "waiting_for": "otp",
+                                    "message": "Please enter the OTP sent to your phone.",
+                                },
+                            })
+                        except Exception:
+                            pass
+                        for _ in range(120):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s or s.waiting_for is None:
+                                break
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": "OTP has been entered. Continue filling the form."}],
+                        })
+                    break
+
+                # CAPTCHA detected — scroll it into view, then trigger modal
+                if "waiting_for_captcha" in text_lower:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        session.waiting_for = "captcha"
+                        session.status = "waiting_captcha"
+                        # Scroll the CAPTCHA element into the viewport so the
+                        # periodic screenshot loop captures it for the user
+                        try:
+                            await form_agent_service.scroll_to_captcha(user_id)
+                        except Exception:
+                            pass
+                        try:
+                            await websocket.send_json({
+                                "type": "form_update",
+                                "data": {
+                                    "status": "waiting_captcha",
+                                    "waiting_for": "captcha",
+                                    "message": "Please solve the CAPTCHA.",
+                                },
+                            })
+                        except Exception:
+                            pass
+                        for _ in range(120):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s or s.waiting_for is None:
+                                break
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": "CAPTCHA has been solved. Continue filling the form."}],
+                        })
+                    break
+
+                # Agent says it's done
+                if "form_complete" in text_lower or any(
+                    w in text_lower
+                    for w in ["submitted successfully", "application complete", "cannot proceed further"]
+                ):
+                    logger.info(f"[AutoAgent] Finished: {text[:120]}")
+                    return
+
+                break  # exit inner loop, go to next outer round
+
+            # Inject continuation prompt for the next round
+            messages.append({
+                "role": "user",
+                "content": [{"text": "Continue. Read the screen and take the next action. Do not stop or ask me anything."}],
+            })
+            await asyncio.sleep(0.5)
+
+    except asyncio.CancelledError:
+        logger.info(f"[AutoAgent] Cancelled for user={user_id}")
+    except Exception as e:
+        logger.error(f"[AutoAgent] Unexpected error: {e}", exc_info=True)
+
+    logger.info(f"[AutoAgent] Done for user={user_id}")

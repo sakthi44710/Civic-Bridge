@@ -90,9 +90,11 @@ class AuthService:
                 logger.info(f"OTP sent to {phone_number} via AWS SNS")
             except Exception as e:
                 logger.error(f"AWS SNS SMS failed: {e}")
-                logger.info(f"DEV MODE - OTP for {phone_number}: {otp}")
         else:
-            logger.info(f"DEV MODE - OTP for {phone_number}: {otp} (SNS not configured)")
+            logger.info(f"SNS not configured — OTP not sent via SMS")
+        
+        # Always log OTP for dev/debug (visible in backend terminal)
+        logger.info(f"DEV OTP for {phone_number}: {otp}")
         
         # Send OTP via Email (SES)
         if email:
@@ -124,7 +126,7 @@ class AuthService:
             else:
                 logger.info(f"DEV MODE - OTP for {email}: {otp} (SES not configured)")
         
-        return {"success": True, "message": "OTP sent successfully", "phone_number": phone_number}
+        return {"success": True, "message": "OTP sent successfully", "phone_number": phone_number, "dev_otp": otp}
     
     def verify_otp_and_login(self, phone_number: str, otp: str) -> Optional[Dict]:
         """Verify OTP and return JWT token"""

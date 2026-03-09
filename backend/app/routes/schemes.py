@@ -1,6 +1,7 @@
 """
 Scheme Routes - Scheme Discovery and Eligibility
 """
+from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 from app.services.scheme_service import scheme_service
@@ -8,6 +9,17 @@ from app.services.dynamodb_service import db
 from app.utils.auth import get_current_user
 
 router = APIRouter(prefix="/schemes", tags=["Schemes"])
+
+
+def _sanitize(obj):
+    """Recursively convert Decimal values (from DynamoDB) to int/float for JSON."""
+    if isinstance(obj, Decimal):
+        return int(obj) if obj == int(obj) else float(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(i) for i in obj]
+    return obj
 
 
 @router.get("/")
@@ -19,7 +31,7 @@ async def list_schemes(
     """Search and list government schemes"""
     schemes = scheme_service.search_schemes(query=query, category=category, state=state)
     return {
-        "schemes": schemes,
+        "schemes": _sanitize(schemes),
         "total": len(schemes),
         "categories": ["education", "healthcare", "agriculture", "welfare"],
     }
@@ -27,15 +39,8 @@ async def list_schemes(
 
 @router.get("/categories")
 async def get_categories():
-    """Get available scheme categories"""
-    return {
-        "categories": [
-            {"id": "education", "name": "Education & Scholarships", "icon": "🎓"},
-            {"id": "healthcare", "name": "Healthcare", "icon": "🏥"},
-            {"id": "agriculture", "name": "Agriculture & Farming", "icon": "🌾"},
-            {"id": "welfare", "name": "Social Welfare", "icon": "🏠"},
-        ]
-    }
+    """Get available scheme categories (derived from actual data)"""
+    return {"categories": scheme_service.list_categories()}
 
 
 @router.get("/match")
@@ -55,7 +60,7 @@ async def match_schemes(user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Matching error: {str(e)}")
     
     return {
-        "matches": matches,
+        "matches": _sanitize(matches),
         "total": len(matches),
         "profile_fields_used": [k for k in profile.keys() if profile[k] and k not in ["user_id", "created_at", "updated_at"]],
     }
@@ -67,7 +72,7 @@ async def get_scheme(scheme_id: str):
     scheme = scheme_service.get_scheme(scheme_id)
     if not scheme:
         raise HTTPException(status_code=404, detail="Scheme not found")
-    return scheme
+    return _sanitize(scheme)
 
 
 @router.get("/{scheme_id}/eligibility")

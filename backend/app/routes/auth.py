@@ -16,7 +16,7 @@ async def send_otp(data: OTPRequest):
     result = auth_service.send_otp(data.phone_number, email=data.email)
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to send OTP"))
-    return {"message": "OTP sent successfully", "phone_number": data.phone_number}
+    return {"message": "OTP sent successfully", "phone_number": data.phone_number, "dev_otp": result.get("dev_otp")}
 
 
 @router.post("/verify-otp")

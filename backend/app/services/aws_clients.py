@@ -47,7 +47,12 @@ class AWSClients:
     
     @lru_cache()
     def bedrock_runtime(self):
-        return self._session.client("bedrock-runtime")
+        bedrock_region = settings.BEDROCK_API_REGION or self._region
+        # Use static API key as bearer token if provided (no Marketplace subscription needed)
+        if settings.BEDROCK_API_KEY:
+            import os
+            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = settings.BEDROCK_API_KEY
+        return self._session.client("bedrock-runtime", region_name=bedrock_region)
     
     @lru_cache()
     def textract(self):

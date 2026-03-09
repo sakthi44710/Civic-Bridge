@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI — Claude Sonnet 4.5 via Bedrock (global cross-region inference profile)
-    BEDROCK_MODEL_ID: str = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    # AI — Mistral Large 3 via Bedrock (ap-south-1)
+    BEDROCK_MODEL_ID: str = "mistral.mistral-large-3-675b-instruct"
     BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
     BEDROCK_API_REGION: str = "ap-south-1"
     

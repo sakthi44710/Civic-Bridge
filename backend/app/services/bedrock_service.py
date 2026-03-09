@@ -1,7 +1,6 @@
-"""AWS Bedrock Service - Claude Sonnet 4.6 via Converse API
+"""AWS Bedrock Service — Mistral Large 3 via Converse API
 
-Claude Sonnet 4.6 -> Fast chat, document classification, form mapping
-Claude Sonnet 4.6 -> Deep reasoning, eligibility analysis
+Mistral Large 3 → Fast chat, document classification, form mapping, eligibility analysis
 
 Uses the universal Converse API (works with all Bedrock models).
 """
@@ -19,11 +18,11 @@ logger = logging.getLogger(__name__)
 # System prompts
 # ============================================================
 
-CHAT_SYSTEM_PROMPT = """You are CivicBridge AI Assistant, helping Indian citizens discover and apply for government welfare schemes.
+CHAT_SYSTEM_PROMPT = """You are CivicBridge AI Assistant, helping Indian citizens discover and apply for government welfare schemes, private scholarships, NGO programmes, and corporate CSR initiatives — ANY scheme available.
 
 Your capabilities:
 1. Understand user needs in any Indian language (respond in the same language)
-2. Match users to eligible government schemes using web search results provided to you
+2. Match users to eligible schemes (government, private, scholarships, NGO) using web search results provided to you
 3. Read and use the user's uploaded document data (Aadhaar, PAN, income certificates, etc.) to pre-fill forms and check eligibility
 4. Guide document upload and verification
 5. Assist with application process
@@ -76,8 +75,8 @@ Respond in JSON:
     "reasoning": "why this classification"
 }"""
 
-ELIGIBILITY_PROMPT = """You are an expert on Indian government welfare schemes.
-Check if this user is eligible for the given government scheme.
+ELIGIBILITY_PROMPT = """You are an expert on Indian government welfare schemes, private scholarships, and other benefit programmes.
+Check if this user is eligible for the given scheme.
 
 Respond in JSON:
 {
@@ -90,7 +89,7 @@ Respond in JSON:
     "recommendation": "brief recommendation text"
 }"""
 
-FORM_MAP_PROMPT = """You are a form-filling assistant for Indian government portals.
+FORM_MAP_PROMPT = """You are a form-filling assistant for government portals, private websites, NGO applications, and any online form.
 Map user data and document data to the form fields. Handle Indian name formats,
 address formats, and document number formats correctly.
 
@@ -111,12 +110,12 @@ Respond in JSON:
 
 
 class BedrockService:
-    """AWS Bedrock AI Service — Claude Sonnet 4.5 via Converse API"""
+    """AWS Bedrock AI Service — Mistral Large 3 via Converse API"""
 
     def __init__(self):
         self.client = aws.bedrock_runtime()
-        self.chat_model = settings.BEDROCK_MODEL_ID       # Claude Sonnet 4.5 - accurate
-        self.smart_model = settings.BEDROCK_MODEL_ID      # Claude Sonnet 4.5 - deep analysis
+        self.chat_model = settings.BEDROCK_MODEL_ID       # Mistral Large 3
+        self.smart_model = settings.BEDROCK_MODEL_ID      # Mistral Large 3
 
     # ============================================================
     # converse_raw — used by the voice pipeline (tool_use support)

@@ -1,0 +1,284 @@
+﻿@import "tailwindcss";
+
+/* ============================================================
+   UMANG – The Spirit of New India  ·  Design System
+   ============================================================ */
+
+@theme {
+  /* ── UMANG Core Palette ── */
+  --color-umang-blue:     #1a237e;
+  --color-umang-blue-d:   #0d1259;
+  --color-umang-blue-l:   #3949ab;
+  --color-umang-sky:      #42a5f5;
+  --color-umang-teal:     #00897b;
+  --color-umang-orange:   #FF9933;
+  --color-umang-green:    #138808;
+  --color-umang-white:    #FFFFFF;
+  --color-umang-bg:       #f0f4f8;
+  --color-umang-card:     #FFFFFF;
+  --color-umang-text:     #1e293b;
+  --color-umang-muted:    #64748b;
+  --color-umang-border:   #e2e8f0;
+
+  --color-saffron: #FF9933;
+  --color-green:   #138808;
+  --color-navy:    #1a237e;
+  --color-success: #22C55E;
+  --color-warning: #F59E0B;
+  --color-error:   #EF4444;
+  --color-info:    #3B82F6;
+
+  --font-family-sans: 'Noto Sans', 'Noto Sans Devanagari', system-ui, -apple-system, sans-serif;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+}
+
+/* ============================================================
+   Base Styles
+   ============================================================ */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  font-family: var(--font-family-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--color-umang-text);
+  background-color: var(--color-umang-bg);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+body { margin: 0; padding: 0; min-height: 100dvh; overscroll-behavior: contain; }
+#root { min-height: 100dvh; display: flex; flex-direction: column; }
+
+/* ============================================================
+   Indian Tricolor Strip
+   ============================================================ */
+.tricolor-strip {
+  height: 4px;
+  background: linear-gradient(90deg, #FF9933 0%, #FF9933 33.33%, #FFFFFF 33.33%, #FFFFFF 66.66%, #138808 66.66%, #138808 100%);
+}
+
+/* ============================================================
+   UMANG Header Gradient
+   ============================================================ */
+.umang-header {
+  background: linear-gradient(135deg, #1a237e 0%, #283593 40%, #3949ab 100%);
+  box-shadow: 0 2px 12px rgba(26,35,126,0.25);
+}
+
+/* ============================================================
+   UMANG Cards
+   ============================================================ */
+.umang-card {
+  background: #FFFFFF;
+  border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.03);
+  transition: box-shadow 0.2s, transform 0.15s;
+}
+.umang-card:hover {
+  box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+  transform: translateY(-1px);
+}
+
+.umang-card-flat {
+  background: #FFFFFF;
+  border-radius: 14px;
+  border: 1px solid #e2e8f0;
+}
+
+/* ============================================================
+   Category Icon Circle
+   ============================================================ */
+.cat-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s;
+}
+.cat-icon:hover { transform: scale(1.08); }
+
+/* ============================================================
+   UMANG Search Bar
+   ============================================================ */
+.umang-search {
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+  transition: background 0.2s, border-color 0.2s;
+}
+.umang-search:focus-within {
+  background: rgba(255,255,255,0.25);
+  border-color: rgba(255,255,255,0.5);
+}
+
+/* ============================================================
+   UMANG Button Primary (Blue)
+   ============================================================ */
+.btn-umang {
+  background: linear-gradient(135deg, #1a237e, #3949ab);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  padding: 14px 28px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+  box-shadow: 0 4px 16px rgba(26,35,126,0.3);
+}
+.btn-umang:hover { opacity: 0.92; transform: translateY(-1px); }
+.btn-umang:active { transform: scale(0.98); }
+
+.btn-umang-outline {
+  background: transparent;
+  color: #1a237e;
+  border: 2px solid #1a237e;
+  border-radius: 12px;
+  padding: 12px 24px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.btn-umang-outline:hover { background: rgba(26,35,126,0.06); }
+
+/* ============================================================
+   UMANG OTP Box
+   ============================================================ */
+.umang-otp {
+  width: 52px;
+  height: 60px;
+  border: 2px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 12px;
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1a237e;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.umang-otp:focus, .umang-otp.filled {
+  border-color: #1a237e;
+  box-shadow: 0 0 0 3px rgba(26,35,126,0.12);
+}
+
+/* ============================================================
+   UMANG Input
+   ============================================================ */
+.umang-input {
+  border: 1.5px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 12px 16px;
+  color: #1e293b;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  width: 100%;
+}
+.umang-input:focus {
+  border-color: #1a237e;
+  box-shadow: 0 0 0 3px rgba(26,35,126,0.1);
+  background: #fff;
+}
+.umang-input::placeholder { color: #94a3b8; }
+
+/* ============================================================
+   Bottom Navigation
+   ============================================================ */
+.umang-bottom-nav {
+  background: #FFFFFF;
+  box-shadow: 0 -2px 12px rgba(0,0,0,0.06);
+  border-top: 1px solid #e2e8f0;
+}
+
+/* ============================================================
+   Status Badge
+   ============================================================ */
+.badge-green  { background: #dcfce7; color: #15803d; }
+.badge-yellow { background: #fef3c7; color: #a16207; }
+.badge-red    { background: #fecaca; color: #dc2626; }
+.badge-blue   { background: #dbeafe; color: #1d4ed8; }
+.badge-orange { background: #ffedd5; color: #c2410c; }
+
+/* ============================================================
+   Chat Bubbles
+   ============================================================ */
+.chat-ai {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px 14px 14px 4px;
+  color: #1e293b;
+}
+.chat-user {
+  background: linear-gradient(135deg, #1a237e, #3949ab);
+  color: white;
+  border-radius: 14px 14px 4px 14px;
+}
+
+/* ============================================================
+   Animations
+   ============================================================ */
+@keyframes pulse-gentle {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+@keyframes wave {
+  0% { transform: scaleY(0.5); }
+  50% { transform: scaleY(1.5); }
+  100% { transform: scaleY(0.5); }
+}
+.animate-pulse-gentle { animation: pulse-gentle 2s ease-in-out infinite; }
+.animate-float { animation: float 3s ease-in-out infinite; }
+
+/* ============================================================
+   Scrollbar
+   ============================================================ */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ============================================================
+   Voice Orb (blue theme)
+   ============================================================ */
+.voice-bar {
+  animation: wave 0.8s ease-in-out infinite;
+  border-radius: 2px;
+}
+.voice-bar:nth-child(2) { animation-delay: 0.1s; }
+.voice-bar:nth-child(3) { animation-delay: 0.2s; }
+.voice-bar:nth-child(4) { animation-delay: 0.15s; }
+
+/* UMANG splash screen */
+.umang-splash-bg {
+  background: linear-gradient(180deg, #1a237e 0%, #283593 50%, #3949ab 100%);
+}
+
+/* ============================================================
+   Responsive helpers
+   ============================================================ */
+.safe-top  { padding-top: env(safe-area-inset-top, 0px); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* High contrast */
+.high-contrast { --color-umang-text: #000000; --color-umang-bg: #FFFFFF; }
