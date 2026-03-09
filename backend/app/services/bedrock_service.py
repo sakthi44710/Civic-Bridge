@@ -110,12 +110,13 @@ Respond in JSON:
 
 
 class BedrockService:
-    """AWS Bedrock AI Service — Mistral Large 3 via Converse API"""
+    """AWS Bedrock AI Service — Primary model with automatic fallback"""
 
     def __init__(self):
         self.client = aws.bedrock_runtime()
-        self.chat_model = settings.BEDROCK_MODEL_ID       # Mistral Large 3
-        self.smart_model = settings.BEDROCK_MODEL_ID      # Mistral Large 3
+        self.chat_model = settings.BEDROCK_MODEL_ID
+        self.smart_model = settings.BEDROCK_MODEL_ID
+        self.fallback_model = settings.BEDROCK_FALLBACK_MODEL_ID
 
     # ============================================================
     # converse_raw — used by the voice pipeline (tool_use support)
@@ -134,6 +135,7 @@ class BedrockService:
 
         Messages must be in Bedrock Converse format.
         Returns dict with keys: stopReason, output.message.content, usage.
+        Automatically falls back to fallback model on failure.
         """
         body: dict = {
             "messages": messages,
@@ -143,7 +145,14 @@ class BedrockService:
             body["system"] = [{"text": system}]
         if tools:
             body["toolConfig"] = {"tools": tools}
-        return self.client.converse(modelId=model_id, **body)
+
+        try:
+            return self.client.converse(modelId=model_id, **body)
+        except (ClientError, Exception) as e:
+            if self.fallback_model and model_id != self.fallback_model:
+                logger.warning(f"Primary model {model_id} failed: {e}. Trying fallback {self.fallback_model}")
+                return self.client.converse(modelId=self.fallback_model, **body)
+            raise
 
     # ============================================================
     # Core invoke via Converse API (universal, works with all models)
@@ -192,12 +201,13 @@ class BedrockService:
                 kwargs["system"] = [{"text": system}]
             response = self.client.converse(**kwargs)
             return response["output"]["message"]["content"][0]["text"]
-        except ClientError as e:
-            error_str = str(e)
-            if "AccessDeniedException" in error_str or "ResourceNotFoundException" in error_str:
-                logger.warning(f"Bedrock model {model_id} not enabled - using fallback")
-            else:
-                logger.error(f"Bedrock API error: {e}")
+        except (ClientError, Exception) as e:
+            if self.fallback_model and model_id != self.fallback_model:
+                logger.warning(f"Primary model {model_id} failed: {e}. Trying fallback {self.fallback_model}")
+                kwargs["modelId"] = self.fallback_model
+                response = self.client.converse(**kwargs)
+                return response["output"]["message"]["content"][0]["text"]
+            logger.error(f"Bedrock API error (no fallback): {e}")
             raise
 
     def _parse_json(self, text: str) -> Optional[Dict]:

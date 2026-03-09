@@ -257,6 +257,8 @@ Resources:
               Value: !Ref AwsRegionName
             - Name: BEDROCK_MODEL_ID
               Value: !Ref BedrockModelId
+            - Name: BEDROCK_FALLBACK_MODEL_ID
+              Value: mistral.mistral-large-2402-v1:0
             - Name: BEDROCK_API_REGION
               Value: !Ref BedrockApiRegion
             - Name: BEDROCK_API_KEY

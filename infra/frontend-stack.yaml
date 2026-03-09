@@ -45,6 +45,13 @@ Resources:
             OriginAccessControlId: !Ref OAC
             S3OriginConfig:
               OriginAccessIdentity: ''
+          - Id: ALBOrigin
+            DomainName: !Select
+              - 1
+              - !Split ['://', !Ref BackendURL]
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
@@ -53,6 +60,26 @@ Resources:
           Compress: true
           ForwardedValues:
             QueryString: false
+        CacheBehaviors:
+          # REST + WebSocket API — forward all to ALB, no caching
+          - PathPattern: /api/*
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: !Ref APICachePolicy
+            OriginRequestPolicyId: !Ref APIOriginRequestPolicy
+          # Health check
+          - PathPattern: /health
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            ForwardedValues:
+              QueryString: false
+            DefaultTTL: 0
+            MinTTL: 0
+            MaxTTL: 0
         # SPA fallback — serve index.html for all 404s (React Router)
         CustomErrorResponses:
           - ErrorCode: 403
@@ -65,6 +92,39 @@ Resources:
             ErrorCachingMinTTL: 10
         PriceClass: PriceClass_200
         Comment: CivicBridge Frontend
+
+  # ── Cache Policy for API (no caching, forward all) ──────
+  APICachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: civicbridge-api-no-cache
+        DefaultTTL: 0
+        MinTTL: 0
+        MaxTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: false
+
+  # ── Origin Request Policy for API (forward headers for WS + auth) ──
+  APIOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: civicbridge-api-forward-all
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: allViewerAndWhitelistCloudFront
+          Headers:
+            - CloudFront-Forwarded-Proto
+        QueryStringsConfig:
+          QueryStringBehavior: all
 
   # ── Bucket Policy — allow CloudFront to read ───────────
   BucketPolicy:

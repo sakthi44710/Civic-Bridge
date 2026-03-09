@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI — Mistral Large 3 via Bedrock (ap-south-1)
+    # AI — Primary + Fallback via Bedrock
     BEDROCK_MODEL_ID: str = "mistral.mistral-large-3-675b-instruct"
+    BEDROCK_FALLBACK_MODEL_ID: str = "mistral.mistral-large-2402-v1:0"
     BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
     BEDROCK_API_REGION: str = "ap-south-1"
     
