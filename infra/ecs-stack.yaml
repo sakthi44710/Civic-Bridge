@@ -16,7 +16,7 @@ Parameters:
     Default: 8000
   DesiredCount:
     Type: Number
-    Default: 1
+    Default: 0
   Cpu:
     Type: String
     Default: '1024'
@@ -66,30 +66,6 @@ Parameters:
     Type: String
 
 Resources:
-
-  # ── ECR Repository ──────────────────────────────────────
-  ECRRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: civicbridge
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 5 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 5
-                },
-                "action": { "type": "expire" }
-              }
-            ]
-          }
 
   # ── ECS Cluster ─────────────────────────────────────────
   ECSCluster:
@@ -356,7 +332,7 @@ Outputs:
     Value: !Sub http://${ALB.DNSName}
   ECRRepository:
     Description: ECR repository URI
-    Value: !GetAtt ECRRepository.RepositoryUri
+    Value: 929094995891.dkr.ecr.ap-south-1.amazonaws.com/civicbridge
   ClusterName:
     Value: !Ref ECSCluster
   ServiceName:

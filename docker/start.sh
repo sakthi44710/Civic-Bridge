@@ -28,4 +28,5 @@ echo "  FastAPI → http://0.0.0.0:8000"
 echo "  noVNC   → http://0.0.0.0:6080/vnc.html"
 echo ""
 
-exec uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
+cd /app/backend
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
