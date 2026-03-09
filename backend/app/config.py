@@ -42,8 +42,10 @@ class Settings(BaseSettings):
     # Sarvam AI — Indian language STT + TTS
     SARVAM_API_KEY: str = ""             # From sarvam.ai dashboard
 
-    # AWS SNS OTP (Twilio removed)
-    SNS_SENDER_ID: str = "CivicBridge"
+    # Twilio SMS OTP
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""
 
     # Live browser (noVNC)
     DISPLAY: str = ":99"

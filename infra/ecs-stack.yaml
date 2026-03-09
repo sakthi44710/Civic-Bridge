@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CivicBridge - ECS Fargate deployment with ALB
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (use default VPC)
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least 2 subnets in different AZs
+  ImageUri:
+    Type: String
+    Description: ECR image URI (account.dkr.ecr.region.amazonaws.com/civicbridge:latest)
+  ContainerPort:
+    Type: Number
+    Default: 8000
+  DesiredCount:
+    Type: Number
+    Default: 1
+  Cpu:
+    Type: String
+    Default: '1024'
+    AllowedValues: ['256', '512', '1024', '2048']
+  Memory:
+    Type: String
+    Default: '2048'
+    AllowedValues: ['512', '1024', '2048', '3072', '4096']
+
+  # Environment variables (passed to container)
+  AwsRegionName:
+    Type: String
+    Default: ap-south-1
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+  BedrockApiRegion:
+    Type: String
+    Default: us-west-2
+  JwtSecret:
+    Type: String
+    NoEcho: true
+  SarvamApiKey:
+    Type: String
+    NoEcho: true
+  BedrockApiKey:
+    Type: String
+    NoEcho: true
+  TwilioAccountSid:
+    Type: String
+    NoEcho: true
+  TwilioAuthToken:
+    Type: String
+    NoEcho: true
+  TwilioPhoneNumber:
+    Type: String
+  GoogleClientId:
+    Type: String
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+  CognitoUserPoolId:
+    Type: String
+  CognitoClientId:
+    Type: String
+  CognitoDomain:
+    Type: String
+
+Resources:
+
+  # ── ECR Repository ──────────────────────────────────────
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: civicbridge
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ── ECS Cluster ─────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: civicbridge
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+
+  # ── CloudWatch Log Group ─────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/civicbridge
+      RetentionInDays: 14
+
+  # ── IAM — Task Execution Role (ECR pull + logs) ─────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: civicbridge-ecs-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ── IAM — Task Role (DynamoDB, S3, Bedrock, etc.) ──────
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: civicbridge-ecs-task
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: civicbridge-task-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AwsRegionName}:${AWS::AccountId}:table/civicbridge-*
+                  - !Sub arn:aws:dynamodb:${AwsRegionName}:${AWS::AccountId}:table/civicbridge-*/index/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::civicbridge-*
+                  - !Sub arn:aws:s3:::civicbridge-*/*
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - textract:AnalyzeDocument
+                  - textract:DetectDocumentText
+                  - comprehend:DetectEntities
+                  - comprehend:DetectKeyPhrases
+                  - translate:TranslateText
+                  - sns:Publish
+                Resource: '*'
+
+  # ── Security Group — ALB ─────────────────────────────────
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CivicBridge ALB - allow HTTP/HTTPS from internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # ── Security Group — ECS Tasks ──────────────────────────
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CivicBridge ECS tasks - allow traffic from ALB only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # ── Application Load Balancer ───────────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: civicbridge-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # ── Target Group ────────────────────────────────────────
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: civicbridge-tg
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      # Stickiness for WebSocket connections
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '3600'
+
+  # ── ALB Listener (HTTP → forward to target group) ──────
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ── ECS Task Definition ─────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: civicbridge
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: civicbridge
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: ENVIRONMENT
+              Value: production
+            - Name: AWS_REGION
+              Value: !Ref AwsRegionName
+            - Name: BEDROCK_MODEL_ID
+              Value: !Ref BedrockModelId
+            - Name: BEDROCK_API_REGION
+              Value: !Ref BedrockApiRegion
+            - Name: BEDROCK_API_KEY
+              Value: !Ref BedrockApiKey
+            - Name: JWT_SECRET
+              Value: !Ref JwtSecret
+            - Name: JWT_ALGORITHM
+              Value: HS256
+            - Name: JWT_EXPIRY_HOURS
+              Value: '24'
+            - Name: SARVAM_API_KEY
+              Value: !Ref SarvamApiKey
+            - Name: TWILIO_ACCOUNT_SID
+              Value: !Ref TwilioAccountSid
+            - Name: TWILIO_AUTH_TOKEN
+              Value: !Ref TwilioAuthToken
+            - Name: TWILIO_PHONE_NUMBER
+              Value: !Ref TwilioPhoneNumber
+            - Name: GOOGLE_CLIENT_ID
+              Value: !Ref GoogleClientId
+            - Name: GOOGLE_CLIENT_SECRET
+              Value: !Ref GoogleClientSecret
+            - Name: COGNITO_USER_POOL_ID
+              Value: !Ref CognitoUserPoolId
+            - Name: COGNITO_CLIENT_ID
+              Value: !Ref CognitoClientId
+            - Name: COGNITO_DOMAIN
+              Value: !Ref CognitoDomain
+            - Name: COGNITO_REGION
+              Value: !Ref AwsRegionName
+            - Name: USERS_TABLE
+              Value: civicbridge-users
+            - Name: DOCUMENTS_TABLE
+              Value: civicbridge-documents
+            - Name: APPLICATIONS_TABLE
+              Value: civicbridge-applications
+            - Name: SCHEMES_TABLE
+              Value: civicbridge-schemes
+            - Name: CONVERSATIONS_TABLE
+              Value: civicbridge-conversations
+            - Name: DOCUMENTS_BUCKET
+              Value: !Sub civicbridge-documents-${AWS::AccountId}
+            - Name: SCREENSHOTS_BUCKET
+              Value: !Sub civicbridge-screenshots-${AWS::AccountId}
+
+  # ── ECS Service ─────────────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: civicbridge-api
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+      LoadBalancers:
+        - ContainerName: civicbridge
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+
+Outputs:
+  BackendURL:
+    Description: Backend API URL (use this in the frontend .env)
+    Value: !Sub http://${ALB.DNSName}
+  ECRRepository:
+    Description: ECR repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+  ClusterName:
+    Value: !Ref ECSCluster
+  ServiceName:
+    Value: !GetAtt ECSService.Name
