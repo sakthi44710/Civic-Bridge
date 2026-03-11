@@ -11,14 +11,15 @@
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 
-const WS_BASE = import.meta.env.VITE_WS_URL
-  || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 const WS_ENDPOINT = `${WS_BASE}/api/v1/ws/voice`;
 
 // VAD settings
-const SILENCE_THRESHOLD = 0.015;   // RMS below this = silence
-const SILENCE_DURATION_MS = 1800;  // 1.8s of silence → auto-stop
-const MIN_RECORD_MS = 600;         // minimum recording length before VAD kicks in
+const SILENCE_THRESHOLD = 0.025;   // Increased from 0.015 - higher threshold = less sensitive
+const SILENCE_DURATION_MS = 1200;  // Reduced from 1800ms - stop faster after silence
+const MIN_RECORD_MS = 800;         // Increased from 600ms - require longer speech before processing
+const MIN_AUDIO_LENGTH = 2000;     // Minimum audio bytes to send (filter out very short clips)
+const NOISE_GATE_THRESHOLD = 0.02; // Minimum RMS level to consider as speech (noise gate)
 
 export type VoiceCallStatus =
   | 'idle'
@@ -34,7 +35,8 @@ export interface FormUpdateData {
   scheme_id?: string;
   status?: string;
   message?: string;
-  waiting_for?: 'otp' | 'captcha' | null;
+  waiting_for?: 'otp' | 'captcha' | 'data' | 'login_check' | 'credentials' | 'password' | null;
+  missing_fields?: string;
   current_page?: number;
   total_pages?: number;
   fields_filled?: number;
@@ -78,6 +80,7 @@ export function useVoiceCall({
   const audioCtxRef = useRef<AudioContext | null>(null);
   const scheduledEndRef = useRef(0);
   const playingCountRef = useRef(0);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
   // VAD (voice activity detection) refs
   const vadCtxRef = useRef<AudioContext | null>(null);
@@ -108,22 +111,38 @@ export function useVoiceCall({
   }, [onFormUpdate, onFormStarted, onFormStopped, onScreenshot, onTranscript, onSessionStarted, conversationId]);
 
   // ── Audio playback (AudioContext — gapless scheduling) ─
-  const _stopAllAudio = useCallback(() => {
-    // Close existing audio context to immediately silence everything
-    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-      audioCtxRef.current.close().catch(() => {});
-    }
-    audioCtxRef.current = null;
-    scheduledEndRef.current = 0;
-    playingCountRef.current = 0;
-  }, []);
-
   const _getAudioCtx = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       audioCtxRef.current = new AudioContext({ sampleRate: 22050 });
       scheduledEndRef.current = 0;
     }
     return audioCtxRef.current;
+  }, []);
+
+  // Stop all currently playing audio
+  const _stopAllAudio = useCallback(() => {
+    // Stop all active audio sources
+    activeSourcesRef.current.forEach(source => {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch {
+        // Source might already be stopped
+      }
+    });
+    activeSourcesRef.current = [];
+    playingCountRef.current = 0;
+    scheduledEndRef.current = 0;
+    
+    // Reset audio context
+    if (audioCtxRef.current) {
+      try {
+        audioCtxRef.current.close();
+      } catch {
+        // Ignore
+      }
+      audioCtxRef.current = null;
+    }
   }, []);
 
   const _enqueueAudio = useCallback(
@@ -143,6 +162,9 @@ export function useVoiceCall({
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
 
+        // Track this source so we can stop it if needed
+        activeSourcesRef.current.push(source);
+
         // Schedule gaplessly right after previous chunk
         const startTime = Math.max(ctx.currentTime, scheduledEndRef.current);
         source.start(startTime);
@@ -150,6 +172,12 @@ export function useVoiceCall({
 
         playingCountRef.current++;
         source.onended = () => {
+          // Remove from active sources
+          const index = activeSourcesRef.current.indexOf(source);
+          if (index > -1) {
+            activeSourcesRef.current.splice(index, 1);
+          }
+          
           playingCountRef.current--;
           if (playingCountRef.current <= 0) {
             setStatus('listening');
@@ -265,6 +293,7 @@ export function useVoiceCall({
       silenceStartRef.current = 0;
 
       const dataArray = new Float32Array(analyser.fftSize);
+      let consecutiveLowFrames = 0; // Track consecutive frames below noise gate
 
       const check = () => {
         if (!isActiveRef.current) return;
@@ -277,6 +306,23 @@ export function useVoiceCall({
         const now = Date.now();
         const elapsed = now - recordStartRef.current;
 
+        // Noise gate: if RMS is consistently below threshold, treat as silence
+        if (rms < NOISE_GATE_THRESHOLD) {
+          consecutiveLowFrames++;
+        } else {
+          consecutiveLowFrames = 0;
+        }
+
+        // If we've had many consecutive low frames and minimum time has passed, stop recording
+        if (consecutiveLowFrames > 10 && elapsed > MIN_RECORD_MS) {
+          if (mediaRecRef.current?.state === 'recording') {
+            mediaRecRef.current.stop();
+          }
+          _stopVad();
+          return;
+        }
+
+        // Original silence detection (for pauses in speech)
         if (rms < SILENCE_THRESHOLD && elapsed > MIN_RECORD_MS) {
           if (silenceStartRef.current === 0) silenceStartRef.current = now;
           if (now - silenceStartRef.current > SILENCE_DURATION_MS) {
@@ -287,7 +333,8 @@ export function useVoiceCall({
             _stopVad();
             return;
           }
-        } else {
+        } else if (rms >= NOISE_GATE_THRESHOLD) {
+          // Reset silence timer only if above noise gate
           silenceStartRef.current = 0;
         }
         vadRafRef.current = requestAnimationFrame(check);
@@ -302,6 +349,11 @@ export function useVoiceCall({
   const _doStartRecording = useCallback(async () => {
     if (mediaRecRef.current?.state === 'recording') return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    // Stop any currently playing audio when user starts speaking
+    if (playingCountRef.current > 0) {
+      _stopAllAudio();
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -327,16 +379,30 @@ export function useVoiceCall({
         const blob = new Blob(chunks, { type: mimeType });
         try {
           const arrayBuffer = await blob.arrayBuffer();
-          if (wsRef.current?.readyState === WebSocket.OPEN && arrayBuffer.byteLength > 1000) {
-            // Stop any playing AI audio — user is speaking over it
-            _stopAllAudio();
+          
+          // Apply MIN_AUDIO_LENGTH check to filter out very short clips (background noise)
+          if (wsRef.current?.readyState === WebSocket.OPEN && arrayBuffer.byteLength >= MIN_AUDIO_LENGTH) {
             wsRef.current.send(arrayBuffer);
+            setStatus('processing');
+          } else {
+            // Audio too short - likely background noise, discard and resume listening
+            console.log('[Recording] Audio too short, discarding:', arrayBuffer.byteLength, 'bytes');
+            setStatus('listening');
+            
+            // Auto-resume recording if in voice mode
+            if (autoRecordRef.current && isActiveRef.current) {
+              setTimeout(() => {
+                if (isActiveRef.current && autoRecordRef.current) {
+                  autoStartFnRef.current?.();
+                }
+              }, 300);
+            }
           }
         } catch (e) {
           console.warn('[Recording send]', e);
+          setStatus('listening');
         }
         setIsRecording(false);
-        setStatus('processing');
       };
 
       recorder.start();
@@ -390,8 +456,12 @@ export function useVoiceCall({
   // ── Text message ──────────────────────────────────────
   const sendTextMessage = useCallback((text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      // Immediately stop any playing AI audio so the new response isn't queued behind it
-      _stopAllAudio();
+      // Stop any currently playing audio when user sends new message
+      if (playingCountRef.current > 0) {
+        _stopAllAudio();
+        setStatus('listening');
+      }
+      
       wsRef.current.send(JSON.stringify({ type: 'text_message', data: text }));
       setStatus('processing');
     }
@@ -445,6 +515,7 @@ export function useVoiceCall({
     autoRecordRef.current = false;
     setVoiceMode(false);
     _stopVad();
+    _stopAllAudio();
     stopRecording();
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'session_end' }));
@@ -456,12 +527,13 @@ export function useVoiceCall({
     setIsRecording(false);
     scheduledEndRef.current = 0;
     playingCountRef.current = 0;
+    activeSourcesRef.current = [];
     // Close audio contexts
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
     vadCtxRef.current?.close().catch(() => {});
     vadCtxRef.current = null;
-  }, [stopRecording, _stopVad]);
+  }, [stopRecording, _stopVad, _stopAllAudio]);
 
   // ── OTP / CAPTCHA relay ───────────────────────────────
   const submitOtp = useCallback((otp: string) => {
@@ -475,6 +547,34 @@ export function useVoiceCall({
       wsRef.current.send(JSON.stringify({ type: 'submit_captcha', text }));
     }
   }, []);
+
+  const submitData = useCallback((data: string, fields?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'submit_data', data, fields: fields || '' }));
+    }
+  }, []);
+
+  // ── Skip/Interrupt current AI response ────────────────
+  const skipResponse = useCallback(() => {
+    if (playingCountRef.current > 0) {
+      _stopAllAudio();
+      setStatus('listening');
+      
+      // Notify server to stop generating response
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'skip_response' }));
+      }
+      
+      // Auto-resume recording if in voice mode
+      if (autoRecordRef.current && isActiveRef.current) {
+        setTimeout(() => {
+          if (isActiveRef.current && autoRecordRef.current) {
+            autoStartFnRef.current?.();
+          }
+        }, 300);
+      }
+    }
+  }, [_stopAllAudio]);
 
   // ── Cleanup on unmount ────────────────────────────────
   useEffect(() => {
@@ -502,5 +602,7 @@ export function useVoiceCall({
     sendTextMessage,
     submitOtp,
     submitCaptcha,
+    submitData,
+    skipResponse,
   };
 }

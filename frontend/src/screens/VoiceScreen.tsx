@@ -4,11 +4,12 @@ import {
   Mic, Send, Phone, PhoneOff, FileText, Upload, Trash2,
   CheckCircle, Loader2, MonitorPlay, Eye, Bot, User, FolderOpen,
   MessageSquare, ChevronLeft, ChevronRight, Plus, Clock, Trash,
+  Pencil, X, Check,
 } from 'lucide-react';
 import { useUserStore } from '@/stores/userStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useVoiceCall, type FormUpdateData } from '@/hooks/useVoiceCall';
-import { documentsAPI, chatAPI } from '@/services/api';
+import { documentsAPI, chatAPI, userAPI } from '@/services/api';
 import Markdown from 'react-markdown';
 import toast from 'react-hot-toast';
 
@@ -39,6 +40,10 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
     filling:         { label: 'Filling form', color: 'bg-[#FF9933]/15 text-[#FF9933]' },
     waiting_otp:     { label: 'OTP needed',   color: 'bg-[#EF4444]/15 text-[#EF4444]' },
     waiting_captcha: { label: 'CAPTCHA',      color: 'bg-[#EF4444]/15 text-[#EF4444]' },
+    waiting_data:    { label: 'Info needed',  color: 'bg-[#F59E0B]/15 text-[#F59E0B]' },
+    waiting_login_check: { label: 'Account check', color: 'bg-[#3B82F6]/15 text-[#3B82F6]' },
+    waiting_credentials: { label: 'Login needed', color: 'bg-[#8B5CF6]/15 text-[#8B5CF6]' },
+    waiting_password: { label: 'Set password', color: 'bg-[#8B5CF6]/15 text-[#8B5CF6]' },
     done:            { label: 'Done!',        color: 'bg-[#22C55E]/15 text-[#22C55E]' },
   };
   const s = map[status] || { label: status, color: 'bg-[#e2e8f0] text-[#64748b]' };
@@ -65,6 +70,9 @@ export const VoiceScreen: React.FC = () => {
   const [browserScreenshot, setBrowserScreenshot] = useState<string | null>(null);
   const [waitingForOtp, setWaitingForOtp] = useState(false);
   const [waitingForCaptcha, setWaitingForCaptcha] = useState(false);
+  const [waitingForPassword, setWaitingForPassword] = useState(false);
+  const [passwordQuestion, setPasswordQuestion] = useState('');
+  const [passwordValue, setPasswordValue] = useState('');
   const [otpValue, setOtpValue] = useState('');
   const [captchaValue, setCaptchaValue] = useState('');
   const [textInput, setTextInput] = useState('');
@@ -93,12 +101,18 @@ export const VoiceScreen: React.FC = () => {
   const [docsLoading, setDocsLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [extraDetails, setExtraDetails] = useState<Record<string, string>>({});
 
   const fetchDocs = useCallback(async () => {
     try {
       const res = await documentsAPI.list();
       setDocs(res.data.documents || []);
     } catch { /* silently fail */ } finally { setDocsLoading(false); }
+    // Also fetch extra_details from profile
+    try {
+      const profileRes = await userAPI.getProfile();
+      setExtraDetails(profileRes.data?.extra_details || {});
+    } catch { /* ignore */ }
   }, []);
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
@@ -141,22 +155,110 @@ export const VoiceScreen: React.FC = () => {
       }
     });
   });
+  // Merge extra_details from profile — user-entered values OVERRIDE document data
+  Object.entries(extraDetails).forEach(([k, v]) => {
+    if (v) extractedData[k] = String(v);
+  });
+
+  const FIELD_LABELS: Record<string, string> = {
+    full_name: 'Full Name', name: 'Name', date_of_birth: 'Date of Birth', dob: 'DOB',
+    gender: 'Gender', father_name: "Father's Name", mother_name: "Mother's Name",
+    aadhaar_number: 'Aadhaar No.', pan_number: 'PAN No.', voter_id: 'Voter ID',
+    phone: 'Phone', mobile: 'Mobile', email: 'Email', address: 'Address',
+    state: 'State', district: 'District', pincode: 'PIN Code',
+    bank_account: 'Bank A/C', ifsc: 'IFSC', income: 'Income', caste: 'Caste',
+    category: 'Category', occupation: 'Occupation', qualification: 'Qualification',
+  };
+
+  // ── Known detail edit/delete/add state ──
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [editFieldName, setEditFieldName] = useState('');
+  const [editValue, setEditValue] = useState('');
+  const [addingDetail, setAddingDetail] = useState(false);
+  const [addFieldName, setAddFieldName] = useState('');
+  const [addFieldValue, setAddFieldValue] = useState('');
+
+  const handleEditSave = async (originalField: string) => {
+    const newName = editFieldName.trim().toLowerCase().replace(/\s+/g, '_');
+    const newVal = editValue.trim();
+    if (!newName || !newVal) return;
+    try {
+      if (newName !== originalField) {
+        // Create new key first, then delete old — safer rename order
+        await userAPI.updateKnownDetail(newName, newVal);
+        await userAPI.deleteKnownDetail(originalField);
+        setExtraDetails(prev => {
+          const next = { ...prev };
+          delete next[originalField];
+          next[newName] = newVal;
+          return next;
+        });
+      } else {
+        setExtraDetails(prev => ({ ...prev, [newName]: newVal }));
+        await userAPI.updateKnownDetail(newName, newVal);
+      }
+      toast.success('Detail updated');
+      setEditingField(null);
+      fetchDocs(); // background refresh
+    } catch {
+      toast.error('Failed to update');
+      fetchDocs(); // revert optimistic update
+    }
+  };
+
+  const handleDeleteDetail = async (field: string) => {
+    if (!window.confirm(`Delete "${FIELD_LABELS[field] || field.replace(/_/g, ' ')}"?`)) return;
+    try {
+      // Optimistic: remove from local state immediately
+      setExtraDetails(prev => { const next = { ...prev }; delete next[field]; return next; });
+      await userAPI.deleteKnownDetail(field);
+      toast.success('Detail removed');
+      fetchDocs(); // background refresh
+    } catch {
+      toast.error('Failed to delete');
+      fetchDocs(); // revert
+    }
+  };
+
+  const handleAddDetail = async () => {
+    const name = addFieldName.trim().toLowerCase().replace(/\s+/g, '_');
+    const val = addFieldValue.trim();
+    if (!name || !val) return;
+    try {
+      // Optimistic: show immediately before API call
+      setExtraDetails(prev => ({ ...prev, [name]: val }));
+      setAddingDetail(false);
+      setAddFieldName('');
+      setAddFieldValue('');
+      await userAPI.updateKnownDetail(name, val);
+      toast.success('Detail added');
+      fetchDocs(); // background refresh
+    } catch {
+      toast.error('Failed to add');
+      // Revert optimistic update
+      setExtraDetails(prev => { const next = { ...prev }; delete next[name]; return next; });
+      setAddingDetail(true);
+      setAddFieldName(name);
+      setAddFieldValue(val);
+    }
+  };
 
   const {
     inCall, voiceMode, status, isRecording,
     startCall, startTextSession, endCall,
     enableVoice, disableVoice,
     sendTextMessage,
-    submitOtp, submitCaptcha,
+    submitOtp, submitCaptcha, submitData,
   } = useVoiceCall({
     token,
     conversationId,
     onFormUpdate: (data: FormUpdateData) => {
       setFormInfo(data);
-      if (data.status === 'waiting_otp')       setWaitingForOtp(true);
+      if (data.status === 'waiting_otp')       { setShowBrowser(true); setWaitingForOtp(true); }
       if (data.status === 'otp_submitted')     setWaitingForOtp(false);
-      if (data.status === 'waiting_captcha')   setWaitingForCaptcha(true);
+      if (data.status === 'waiting_captcha')   { setShowBrowser(true); setWaitingForCaptcha(true); }
       if (data.status === 'captcha_submitted') setWaitingForCaptcha(false);
+      if (data.status === 'waiting_password') { setShowBrowser(true); setWaitingForPassword(true); setPasswordQuestion(data.message || 'Please choose a password for your new account.'); setPasswordValue(''); }
     },
     onFormStarted: () => setShowBrowser(true),
     onFormStopped: () => { setShowBrowser(false); setFormInfo(null); setBrowserScreenshot(null); },
@@ -218,6 +320,14 @@ export const VoiceScreen: React.FC = () => {
     setWaitingForCaptcha(false);
   }, [captchaValue, submitCaptcha]);
 
+  const handlePasswordSubmit = useCallback(() => {
+    if (!passwordValue.trim() || passwordValue.length < 8) return;
+    if (!/[a-zA-Z]/.test(passwordValue) || !/[0-9]/.test(passwordValue)) return;
+    submitData(passwordValue.trim());
+    setPasswordValue('');
+    setWaitingForPassword(false);
+  }, [passwordValue, submitData]);
+
   const handleSendText = useCallback(() => {
     if (!textInput.trim()) return;
     if (!inCall) {
@@ -243,16 +353,6 @@ export const VoiceScreen: React.FC = () => {
   const formPct = formInfo?.total_fields && formInfo.total_fields > 0
     ? Math.round(((formInfo.fields_filled || 0) / formInfo.total_fields) * 100)
     : 0;
-
-  const FIELD_LABELS: Record<string, string> = {
-    full_name: 'Full Name', name: 'Name', date_of_birth: 'Date of Birth', dob: 'DOB',
-    gender: 'Gender', father_name: "Father's Name", mother_name: "Mother's Name",
-    aadhaar_number: 'Aadhaar No.', pan_number: 'PAN No.', voter_id: 'Voter ID',
-    phone: 'Phone', mobile: 'Mobile', email: 'Email', address: 'Address',
-    state: 'State', district: 'District', pincode: 'PIN Code',
-    bank_account: 'Bank A/C', ifsc: 'IFSC', income: 'Income', caste: 'Caste',
-    category: 'Category', occupation: 'Occupation', qualification: 'Qualification',
-  };
 
   return (
     <div
@@ -311,23 +411,73 @@ export const VoiceScreen: React.FC = () => {
 
         {/* ── Bottom: Extracted/Known Data ── */}
         <div className="flex flex-col h-1/2">
-          <div className="shrink-0 px-4 py-3 border-b border-[#f0f0f0]" style={{ background: 'linear-gradient(135deg,#F0FDF4,#F8FAFC)' }}>
+          <div className="shrink-0 px-4 py-3 flex items-center justify-between border-b border-[#f0f0f0]" style={{ background: 'linear-gradient(135deg,#F0FDF4,#F8FAFC)' }}>
             <div className="flex items-center gap-2">
               <CheckCircle size={15} className="text-[#138808]" />
               <span className="text-xs font-bold text-[#138808] uppercase tracking-wider">Known Details</span>
             </div>
+            <button onClick={() => { setAddingDetail(true); setAddFieldName(''); setAddFieldValue(''); }}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#138808] text-white text-[10px] font-semibold hover:bg-[#0f6b06] transition-colors cursor-pointer">
+              <Plus size={11} /> Add
+            </button>
           </div>
           <div className="flex-1 overflow-y-auto p-3">
-            {Object.keys(extractedData).length === 0 ? (
+            {/* Inline add form */}
+            {addingDetail && (
+              <div className="flex flex-col gap-1.5 px-2 py-2 mb-2 rounded-lg bg-[#f0fdf4] border border-[#138808]/20">
+                <input
+                  autoFocus
+                  placeholder="Field name (e.g. Father's Name)"
+                  className="text-[11px] text-[#1e293b] border border-[#cbd5e1] rounded px-2 py-1 outline-none focus:border-[#138808]"
+                  value={addFieldName}
+                  onChange={e => setAddFieldName(e.target.value)}
+                />
+                <input
+                  placeholder="Value"
+                  className="text-[11px] text-[#1e293b] border border-[#cbd5e1] rounded px-2 py-1 outline-none focus:border-[#138808]"
+                  value={addFieldValue}
+                  onChange={e => setAddFieldValue(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleAddDetail(); if (e.key === 'Escape') setAddingDetail(false); }}
+                />
+                <div className="flex gap-1.5 justify-end">
+                  <button onClick={() => setAddingDetail(false)} className="px-2 py-0.5 rounded text-[10px] text-[#64748b] hover:bg-[#e2e8f0] cursor-pointer">Cancel</button>
+                  <button onClick={handleAddDetail} className="px-2 py-0.5 rounded text-[10px] bg-[#138808] text-white hover:bg-[#0f6b06] cursor-pointer">Save</button>
+                </div>
+              </div>
+            )}
+            {Object.keys(extractedData).length === 0 && !addingDetail ? (
               <div className="flex flex-col items-center justify-center h-full text-center px-3">
-                <p className="text-[11px] text-[#94a3b8] leading-relaxed">Upload documents to auto-extract your details (Aadhaar, PAN, etc.)</p>
+                <p className="text-[11px] text-[#94a3b8] leading-relaxed">Upload documents or click Add to enter your details</p>
               </div>
             ) : (
               <div className="space-y-1">
                 {Object.entries(extractedData).map(([key, value]) => (
-                  <div key={key} className="flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-[#f8fafc]">
-                    <span className="text-[10px] text-[#94a3b8] w-[72px] shrink-0 pt-0.5 truncate" title={key}>{FIELD_LABELS[key] || key.replace(/_/g, ' ')}</span>
-                    <span className="text-[11px] font-medium text-[#1e293b] flex-1 break-all">{value}</span>
+                  <div key={key} className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-[#f8fafc] group">
+                    {editingField === key ? (
+                      <>
+                        <input
+                          className="text-[10px] text-[#64748b] w-[68px] shrink-0 border border-[#1a237e]/30 rounded px-1 py-0.5 outline-none focus:border-[#1a237e]"
+                          value={editFieldName}
+                          onChange={e => setEditFieldName(e.target.value)}
+                        />
+                        <input
+                          autoFocus
+                          className="text-[11px] font-medium text-[#1e293b] flex-1 min-w-0 border border-[#1a237e]/30 rounded px-1.5 py-0.5 outline-none focus:border-[#1a237e]"
+                          value={editValue}
+                          onChange={e => setEditValue(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleEditSave(key); if (e.key === 'Escape') setEditingField(null); }}
+                        />
+                        <button onClick={() => handleEditSave(key)} className="p-0.5 rounded hover:bg-green-50 text-green-600 cursor-pointer"><Check size={12} /></button>
+                        <button onClick={() => setEditingField(null)} className="p-0.5 rounded hover:bg-red-50 text-red-400 cursor-pointer"><X size={12} /></button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-[10px] text-[#94a3b8] w-[68px] shrink-0 truncate" title={key}>{FIELD_LABELS[key] || key.replace(/_/g, ' ')}</span>
+                        <span className="text-[11px] font-medium text-[#1e293b] flex-1 break-all">{value}</span>
+                        <button onClick={() => { setEditingField(key); setEditFieldName(key); setEditValue(value); }} className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-blue-50 text-[#94a3b8] hover:text-[#1a237e] transition-all cursor-pointer" title="Edit"><Pencil size={11} /></button>
+                        <button onClick={() => handleDeleteDetail(key)} className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-50 text-[#94a3b8] hover:text-red-400 transition-all cursor-pointer" title="Delete"><Trash2 size={11} /></button>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>
@@ -420,65 +570,6 @@ export const VoiceScreen: React.FC = () => {
                   </div>
                 </div>
               )}
-
-              {/* OTP modal */}
-              <AnimatePresence>
-                {waitingForOtp && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                    className="absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}>
-                    <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
-                      className="bg-white rounded-2xl p-6 w-80 shadow-2xl border border-[#e2e8f0]">
-                      <div className="h-1 rounded-t-2xl -mx-6 -mt-6 mb-5" style={{ background: 'linear-gradient(90deg,#FF9933 33%,#fff 33%,#fff 66%,#138808 66%)' }} />
-                      <div className="text-center mb-5">
-                        <div className="w-14 h-14 rounded-full bg-[#EEF2FF] flex items-center justify-center mx-auto mb-3"><span className="text-2xl">📱</span></div>
-                        <h3 className="font-bold text-[#1e293b] text-lg">Enter OTP</h3>
-                        <p className="text-sm text-[#64748b] mt-1">OTP sent to your registered mobile</p>
-                      </div>
-                      <input type="text" inputMode="numeric" maxLength={6} value={otpValue} onChange={e => setOtpValue(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && handleOtpSubmit()} placeholder="• • • • • •" autoFocus
-                        className="w-full rounded-xl px-4 py-3 text-center text-2xl tracking-[0.5em] font-bold outline-none border-2 mb-3 transition-colors"
-                        style={{ borderColor: otpValue ? '#1a237e' : '#e2e8f0', color: '#1a237e' }} />
-                      <button onClick={handleOtpSubmit} disabled={!otpValue.trim()}
-                        className="w-full py-3 rounded-xl font-bold text-sm transition-all cursor-pointer"
-                        style={{ background: otpValue.trim() ? '#1a237e' : '#e2e8f0', color: otpValue.trim() ? 'white' : '#94a3b8' }}>
-                        <CheckCircle size={16} className="inline mr-2" /> Submit OTP
-                      </button>
-                    </motion.div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* CAPTCHA modal */}
-              <AnimatePresence>
-                {waitingForCaptcha && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                    className="absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}>
-                    <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
-                      className="bg-white rounded-2xl p-6 shadow-2xl border border-[#e2e8f0]" style={{ width: browserScreenshot ? 480 : 320, maxWidth: '95vw' }}>
-                      <div className="h-1 rounded-t-2xl -mx-6 -mt-6 mb-5" style={{ background: 'linear-gradient(90deg,#FF9933 33%,#fff 33%,#fff 66%,#138808 66%)' }} />
-                      <div className="text-center mb-4">
-                        <div className="w-14 h-14 rounded-full bg-[#FFF7ED] flex items-center justify-center mx-auto mb-3"><span className="text-2xl">🔐</span></div>
-                        <h3 className="font-bold text-[#1e293b] text-lg">Solve CAPTCHA</h3>
-                        <p className="text-sm text-[#64748b] mt-1">Type the characters shown below</p>
-                      </div>
-                      {browserScreenshot && (
-                        <div className="mb-4 rounded-xl overflow-hidden border-2 border-[#e2e8f0] bg-[#f8fafc]">
-                          <img src={browserScreenshot} alt="Browser view showing CAPTCHA" className="w-full rounded-xl" />
-                        </div>
-                      )}
-                      <input type="text" value={captchaValue} onChange={e => setCaptchaValue(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && handleCaptchaSubmit()} placeholder="Type CAPTCHA here…" autoFocus
-                        className="w-full rounded-xl px-4 py-3 text-center text-lg font-mono outline-none border-2 mb-3 transition-colors"
-                        style={{ borderColor: captchaValue ? '#FF9933' : '#e2e8f0', color: '#1e293b' }} />
-                      <button onClick={handleCaptchaSubmit} disabled={!captchaValue.trim()}
-                        className="w-full py-3 rounded-xl font-bold text-sm transition-all cursor-pointer"
-                        style={{ background: captchaValue.trim() ? '#FF9933' : '#e2e8f0', color: captchaValue.trim() ? 'white' : '#94a3b8' }}>
-                        Submit CAPTCHA
-                      </button>
-                    </motion.div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
             </>
           ) : (
             /* ── Idle state ── */
@@ -511,6 +602,105 @@ export const VoiceScreen: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* ── OTP modal ── */}
+          <AnimatePresence>
+            {waitingForOtp && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}
+                role="dialog" aria-modal="true" aria-label="Enter OTP"
+                onKeyDown={e => { if (e.key === 'Escape') setWaitingForOtp(false); }}>
+                <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                  className="bg-white rounded-2xl p-6 w-80 shadow-2xl border border-[#e2e8f0]">
+                  <div className="h-1 rounded-t-2xl -mx-6 -mt-6 mb-5" style={{ background: 'linear-gradient(90deg,#FF9933 33%,#fff 33%,#fff 66%,#138808 66%)' }} />
+                  <div className="text-center mb-5">
+                    <div className="w-14 h-14 rounded-full bg-[#EEF2FF] flex items-center justify-center mx-auto mb-3"><span className="text-2xl">📱</span></div>
+                    <h3 className="font-bold text-[#1e293b] text-lg">Enter OTP</h3>
+                    <p className="text-sm text-[#64748b] mt-1">OTP sent to your registered mobile</p>
+                  </div>
+                  <input type="text" inputMode="numeric" maxLength={6} value={otpValue} onChange={e => setOtpValue(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleOtpSubmit()} placeholder="• • • • • •" autoFocus
+                    className="w-full rounded-xl px-4 py-3 text-center text-2xl tracking-[0.5em] font-bold outline-none border-2 mb-3 transition-colors"
+                    style={{ borderColor: otpValue ? '#1a237e' : '#e2e8f0', color: '#1a237e' }} />
+                  <button onClick={handleOtpSubmit} disabled={!otpValue.trim()}
+                    className="w-full py-3 rounded-xl font-bold text-sm transition-all cursor-pointer"
+                    style={{ background: otpValue.trim() ? '#1a237e' : '#e2e8f0', color: otpValue.trim() ? 'white' : '#94a3b8' }}>
+                    <CheckCircle size={16} className="inline mr-2" /> Submit OTP
+                  </button>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* ── CAPTCHA modal ── */}
+          <AnimatePresence>
+            {waitingForCaptcha && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}
+                role="dialog" aria-modal="true" aria-label="Solve CAPTCHA"
+                onKeyDown={e => { if (e.key === 'Escape') setWaitingForCaptcha(false); }}>
+                <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                  className="bg-white rounded-2xl p-6 shadow-2xl border border-[#e2e8f0]" style={{ width: browserScreenshot ? 480 : 320, maxWidth: '95vw' }}>
+                  <div className="h-1 rounded-t-2xl -mx-6 -mt-6 mb-5" style={{ background: 'linear-gradient(90deg,#FF9933 33%,#fff 33%,#fff 66%,#138808 66%)' }} />
+                  <div className="text-center mb-4">
+                    <div className="w-14 h-14 rounded-full bg-[#FFF7ED] flex items-center justify-center mx-auto mb-3"><span className="text-2xl">🔐</span></div>
+                    <h3 className="font-bold text-[#1e293b] text-lg">Solve CAPTCHA</h3>
+                    <p className="text-sm text-[#64748b] mt-1">Type the characters shown below</p>
+                  </div>
+                  {browserScreenshot && (
+                    <div className="mb-4 rounded-xl overflow-hidden border-2 border-[#e2e8f0] bg-[#f8fafc]">
+                      <img src={browserScreenshot} alt="Browser view showing CAPTCHA" className="w-full rounded-xl" />
+                    </div>
+                  )}
+                  <input type="text" value={captchaValue} onChange={e => setCaptchaValue(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleCaptchaSubmit()} placeholder="Type CAPTCHA here…" autoFocus
+                    className="w-full rounded-xl px-4 py-3 text-center text-lg font-mono outline-none border-2 mb-3 transition-colors"
+                    style={{ borderColor: captchaValue ? '#FF9933' : '#e2e8f0', color: '#1e293b' }} />
+                  <button onClick={handleCaptchaSubmit} disabled={!captchaValue.trim()}
+                    className="w-full py-3 rounded-xl font-bold text-sm transition-all cursor-pointer"
+                    style={{ background: captchaValue.trim() ? '#FF9933' : '#e2e8f0', color: captchaValue.trim() ? 'white' : '#94a3b8' }}>
+                    Submit CAPTCHA
+                  </button>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* ── Password modal ── */}
+          <AnimatePresence>
+            {waitingForPassword && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}
+                role="dialog" aria-modal="true" aria-label="Set Password"
+                onKeyDown={e => { if (e.key === 'Escape') setWaitingForPassword(false); }}>
+                <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                  className="bg-white rounded-2xl p-6 w-96 max-w-[95vw] shadow-2xl border border-[#e2e8f0]">
+                  <div className="h-1 rounded-t-2xl -mx-6 -mt-6 mb-5" style={{ background: 'linear-gradient(90deg,#FF9933 33%,#fff 33%,#fff 66%,#138808 66%)' }} />
+                  <div className="text-center mb-5">
+                    <div className="w-14 h-14 rounded-full bg-[#F0FDF4] flex items-center justify-center mx-auto mb-3"><span className="text-2xl">🔒</span></div>
+                    <h3 className="font-bold text-[#1e293b] text-lg">Set Password</h3>
+                    <div className="text-sm text-[#64748b] mt-2 leading-relaxed text-left prose prose-sm max-w-none prose-p:my-0.5"><Markdown>{passwordQuestion}</Markdown></div>
+                  </div>
+                  <input
+                    type="password"
+                    value={passwordValue}
+                    onChange={e => setPasswordValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handlePasswordSubmit(); }}
+                    placeholder="Choose a strong password"
+                    autoFocus
+                    className="w-full rounded-xl px-4 py-3 text-sm outline-none border-2 mb-2 transition-colors"
+                    style={{ borderColor: passwordValue ? '#138808' : '#e2e8f0', color: '#1e293b' }}
+                  />
+                  <p className="text-[10px] text-[#94a3b8] mb-3 px-1">At least 8 characters with letters and numbers</p>
+                  <button onClick={handlePasswordSubmit} disabled={!passwordValue.trim() || passwordValue.length < 8 || !/[a-zA-Z]/.test(passwordValue) || !/[0-9]/.test(passwordValue)}
+                    className="w-full py-3 rounded-xl font-bold text-sm transition-all cursor-pointer"
+                    style={{ background: passwordValue.trim() && passwordValue.length >= 8 && /[a-zA-Z]/.test(passwordValue) && /[0-9]/.test(passwordValue) ? '#138808' : '#e2e8f0', color: passwordValue.trim() && passwordValue.length >= 8 && /[a-zA-Z]/.test(passwordValue) && /[0-9]/.test(passwordValue) ? 'white' : '#94a3b8' }}>
+                    <CheckCircle size={16} className="inline mr-2" /> Set Password
+                  </button>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
 

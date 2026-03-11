@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CivicBridge</string>
+    <string name="title_activity_main">CivicBridge</string>
+    <string name="package_name">com.civicbridge.app</string>
+    <string name="custom_url_scheme">com.civicbridge.app</string>
+</resources>

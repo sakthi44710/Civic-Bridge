@@ -1,206 +1,321 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
-Description: CivicBridge - AI-powered Government Scheme Discovery Platform
-
-Globals:
-  Function:
-    Timeout: 30
-    MemorySize: 512
-    Runtime: python3.12
-    Environment:
-      Variables:
-        AWS_REGION_NAME: ap-south-1
-        ENVIRONMENT: production
-        USERS_TABLE: !Ref UsersTable
-        DOCUMENTS_TABLE: !Ref DocumentsTable
-        APPLICATIONS_TABLE: !Ref ApplicationsTable
-        SCHEMES_TABLE: !Ref SchemesTable
-        CONVERSATIONS_TABLE: !Ref ConversationsTable
-        DOCUMENTS_BUCKET: !Ref DocumentsBucket
-        SCREENSHOTS_BUCKET: !Ref ScreenshotsBucket
-        BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+Description: CivicBridge - AI-powered Government Scheme Discovery Platform (ECS Fargate)
 
 Parameters:
   Stage:
     Type: String
     Default: prod
     AllowedValues: [dev, staging, prod]
-  JwtSecret:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy ECS into
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for ALB and ECS tasks (at least 2 AZs)
+  DockerImageUri:
     Type: String
-    NoEcho: true
-    Default: change-this-in-production
+    Description: ECR image URI (e.g. 123456789.dkr.ecr.ap-south-1.amazonaws.com/civicbridge:latest)
 
 Resources:
-  # API Gateway
-  ApiGateway:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: !Ref Stage
-      Cors:
-        AllowMethods: "'*'"
-        AllowHeaders: "'Content-Type,Authorization'"
-        AllowOrigin: "'*'"
 
-  # Lambda Function
-  CivicBridgeFunction:
-    Type: AWS::Serverless::Function
+  # ─── ECS Cluster ────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
     Properties:
-      Handler: lambda_handler.handler
-      CodeUri: backend/
-      Description: CivicBridge API Lambda Function
+      ClusterName: !Sub civicbridge-${Stage}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ─── Task Execution Role (ECR pull + CloudWatch logs) ───────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub civicbridge-task-exec-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref UsersTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref DocumentsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ApplicationsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SchemesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ConversationsTable
-        - S3CrudPolicy:
-            BucketName: !Ref DocumentsBucket
-        - S3CrudPolicy:
-            BucketName: !Ref ScreenshotsBucket
-        - Statement:
-            - Effect: Allow
-              Action:
-                - bedrock:InvokeModel
-                - transcribe:*
-                - polly:*
-                - textract:*
-                - comprehend:*
-                - translate:*
-                - sns:Publish
-              Resource: '*'
-      Events:
-        ApiProxy:
-          Type: Api
-          Properties:
-            RestApiId: !Ref ApiGateway
-            Path: /{proxy+}
-            Method: ANY
+        - PolicyName: SSMReadSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/civicbridge/${Stage}/*
 
-  # DynamoDB Tables
-  UsersTable:
-    Type: AWS::DynamoDB::Table
+  # ─── Task Role (app permissions: DynamoDB, S3, Bedrock, etc.) ───────────
+  TaskRole:
+    Type: AWS::IAM::Role
     Properties:
-      TableName: !Sub civicbridge-users-${Stage}
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: phone_number
-          AttributeType: S
-      KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: phone-index
-          KeySchema:
-            - AttributeName: phone_number
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
+      RoleName: !Sub civicbridge-task-role-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CivicBridgeAppPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-users
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-users/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-documents
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-applications
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-schemes
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-schemes/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/civicbridge-conversations
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::civicbridge-documents-${AWS::AccountId}/*
+                  - !Sub arn:aws:s3:::civicbridge-documents-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::civicbridge-screenshots-${AWS::AccountId}/*
+                  - !Sub arn:aws:s3:::civicbridge-screenshots-${AWS::AccountId}
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - textract:DetectDocumentText
+                  - textract:AnalyzeDocument
+                  - comprehend:DetectSentiment
+                  - comprehend:DetectEntities
+                  - comprehend:DetectPiiEntities
+                  - translate:TranslateText
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
 
-  DocumentsTable:
-    Type: AWS::DynamoDB::Table
+  # ─── CloudWatch Log Group ───────────────────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
     Properties:
-      TableName: !Sub civicbridge-documents-${Stage}
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: document_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-        - AttributeName: document_id
-          KeyType: RANGE
+      LogGroupName: !Sub /ecs/civicbridge-${Stage}
+      RetentionInDays: 30
 
-  ApplicationsTable:
-    Type: AWS::DynamoDB::Table
+  # ─── ECS Task Definition — 2 vCPU / 4 GB ───────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
     Properties:
-      TableName: !Sub civicbridge-applications-${Stage}
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: application_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-        - AttributeName: application_id
-          KeyType: RANGE
+      Family: !Sub civicbridge-${Stage}
+      Cpu: '2048'
+      Memory: '4096'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: civicbridge
+          Image: !Ref DockerImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+            - ContainerPort: 6080
+              Protocol: tcp
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Stage
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: USERS_TABLE
+              Value: civicbridge-users
+            - Name: DOCUMENTS_TABLE
+              Value: civicbridge-documents
+            - Name: APPLICATIONS_TABLE
+              Value: civicbridge-applications
+            - Name: SCHEMES_TABLE
+              Value: civicbridge-schemes
+            - Name: CONVERSATIONS_TABLE
+              Value: civicbridge-conversations
+            - Name: DOCUMENTS_BUCKET
+              Value: !Sub civicbridge-documents-${AWS::AccountId}
+            - Name: SCREENSHOTS_BUCKET
+              Value: !Sub civicbridge-screenshots-${AWS::AccountId}
+            - Name: BEDROCK_MODEL_ID
+              Value: mistral.mistral-large-3-675b-instruct
+            - Name: BEDROCK_API_REGION
+              Value: ap-south-1
+            - Name: DISPLAY
+              Value: ':99'
+            - Name: NOVNC_PORT
+              Value: '6080'
+            - Name: VNC_PORT
+              Value: '5900'
+          Secrets:
+            - Name: JWT_SECRET
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/civicbridge/${Stage}/jwt-secret
+            - Name: SARVAM_API_KEY
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/civicbridge/${Stage}/sarvam-api-key
+            - Name: BEDROCK_API_KEY
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/civicbridge/${Stage}/bedrock-api-key
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8000/health || exit 1
+            Interval: 30
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 60
 
-  SchemesTable:
-    Type: AWS::DynamoDB::Table
+  # ─── Security Group for ALB ─────────────────────────────────────────────
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      TableName: !Sub civicbridge-schemes-${Stage}
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: scheme_id
-          AttributeType: S
-        - AttributeName: category
-          AttributeType: S
-      KeySchema:
-        - AttributeName: scheme_id
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: category-index
-          KeySchema:
-            - AttributeName: category
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
+      GroupDescription: CivicBridge ALB - HTTP/HTTPS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
 
-  ConversationsTable:
-    Type: AWS::DynamoDB::Table
+  # ─── Security Group for ECS Tasks ──────────────────────────────────────
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      TableName: !Sub civicbridge-conversations-${Stage}
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: conversation_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-        - AttributeName: conversation_id
-          KeyType: RANGE
+      GroupDescription: CivicBridge ECS Tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 6080
+          ToPort: 6080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
 
-  # S3 Buckets
-  DocumentsBucket:
-    Type: AWS::S3::Bucket
+  # ─── Application Load Balancer (WebSocket + HTTP) ───────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      BucketName: !Sub civicbridge-documents-${Stage}-${AWS::AccountId}
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+      Name: !Sub civicbridge-${Stage}
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
 
-  ScreenshotsBucket:
-    Type: AWS::S3::Bucket
+  # ─── Target Group — FastAPI (port 8000) ─────────────────────────────────
+  TargetGroupAPI:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      BucketName: !Sub civicbridge-screenshots-${Stage}-${AWS::AccountId}
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+      Name: !Sub cb-api-${Stage}
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      # Stickiness required for WebSocket connections
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '86400'
+        - Key: deregistration_delay.timeout_seconds
+          Value: '300'
+
+  # ─── ALB Listener (HTTP → port 8000) ───────────────────────────────────
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupAPI
+
+  # ─── ECS Service — 1 task, auto-restart ─────────────────────────────────
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub civicbridge-${Stage}
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: civicbridge
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroupAPI
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+      EnableExecuteCommand: true
 
 Outputs:
-  ApiUrl:
-    Description: API Gateway URL
-    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
-  FunctionArn:
-    Description: Lambda Function ARN
-    Value: !GetAtt CivicBridgeFunction.Arn
+  ALBDnsName:
+    Description: Application Load Balancer DNS (use as backend URL)
+    Value: !GetAtt ALB.DNSName
+  APIURL:
+    Description: Backend API URL
+    Value: !Sub http://${ALB.DNSName}/api/v1
+  WebSocketURL:
+    Description: WebSocket URL for voice pipeline
+    Value: !Sub ws://${ALB.DNSName}/api/v1/ws/voice
+  ClusterName:
+    Value: !Ref ECSCluster
+  ServiceName:
+    Value: !GetAtt ECSService.Name
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition

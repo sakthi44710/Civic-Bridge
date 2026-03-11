@@ -11,7 +11,7 @@ import {
   Scale, Tractor, BookOpen, Building2, HelpCircle, X,
   MessageCircle, Play, Pause, Loader2, Sparkles, Zap, Trash2, Eye, Edit2,
 } from 'lucide-react';
-import { documentsAPI, userAPI } from '@/services/api';
+import { documentsAPI, userAPI, chatAPI } from '@/services/api';
 import { useUserStore } from '@/stores/userStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useVoice } from '@/hooks/useVoice';
@@ -586,126 +586,55 @@ function extractGender(criteria: unknown): string {
   return g.map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(', ');
 }
 
-/* Safe string — guards against API fields that are unexpectedly objects/arrays */
-function safeStr(v: unknown, fallback = ''): string {
-  if (v === null || v === undefined) return fallback;
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  return fallback;
-}
-
 /* Map an API scheme record to the local SchemeItem shape */
 function mapApiToSchemeItem(raw: Record<string, unknown>, index: number): SchemeItem {
-  const catKey = safeStr(raw.category, 'welfare').toLowerCase();
+  const catKey = (typeof raw.category === 'string' ? raw.category : 'welfare').toLowerCase();
   const vis = CATEGORY_VISUALS[catKey] || DEFAULT_VISUAL;
   const catDisplay = catKey.charAt(0).toUpperCase() + catKey.slice(1);
   const elig = raw.eligibility_criteria;
   return {
-    id: safeStr(raw.scheme_id, `api-${index}`),
-    name: safeStr(raw.name),
-    nameHi: safeStr(raw.name_hi) || safeStr(raw.name),
+    id: (raw.scheme_id as string) || `api-${index}`,
+    name: (raw.name as string) || '',
+    nameHi: (raw.name_hi as string) || (raw.name as string) || '',
     category: catDisplay,
     beneficiary: extractBeneficiary(elig),
     gender: extractGender(elig),
     occupation: 'Any',
-    description: safeStr(raw.description),
+    description: (raw.description as string) || '',
     eligibility: formatEligibility(elig),
-    benefit: safeStr(raw.benefit_description) || (raw.benefit_amount ? `₹${raw.benefit_amount}` : 'See portal'),
-    howToApply: safeStr(raw.how_to_apply) || (raw.portal_url ? `Apply online at ${safeStr(raw.portal_url)}` : 'Contact the concerned department'),
-    department: safeStr(raw.ministry),
-    url: safeStr(raw.portal_url) || safeStr(raw.application_url),
+    benefit: (raw.benefit_description as string) || (raw.benefit_amount ? `₹${raw.benefit_amount}` : 'See portal'),
+    howToApply: (raw.how_to_apply as string) || ((raw.portal_url as string) ? `Apply online at ${raw.portal_url}` : 'Contact the concerned department'),
+    department: (raw.ministry as string) || '',
+    url: (raw.portal_url as string) || (raw.application_url as string) || '',
     icon: vis.icon,
     color: vis.color,
     status: 'Eligible',
   };
 }
 
-/* ── Eligibility helper (used inside SchemesGrid with real profile) ── */
-function buildEligibilityChecker(profile: Record<string, unknown>, verifiedDocTypes: Set<string>) {
-  return (scheme: SchemeItem): boolean => {
-    const category = String(profile.category || '').toLowerCase();
-    const gender   = String(profile.gender   || '').toLowerCase();
-    const occupation = String(profile.occupation || '').toLowerCase();
-    const income   = Number(profile.annual_income || 0);
-
-    const b = scheme.beneficiary.toLowerCase();
-    const g = scheme.gender.toLowerCase();
-    const o = scheme.occupation.toLowerCase();
-
-    /* Beneficiary / community match */
-    const catMatch =
-      b.includes('all') ||
-      b.includes('categories') ||
-      (b.includes('sc') && (category === 'sc' || category === 'st')) ||
-      (b.includes('st') && category === 'st') ||
-      (b.includes('obc') && category === 'obc') ||
-      (b.includes('bc')  && (category === 'obc' || category === 'bc')) ||
-      (b.includes('mbc') && (category === 'obc' || category === 'mbc')) ||
-      (b.includes('ews') && category === 'ews') ||
-      (category !== '' && b.includes(category));
-
-    /* Gender match */
-    const genderMatch =
-      g === 'any' ||
-      g.includes('male & female') ||
-      (gender === 'male'   && g.includes('male')) ||
-      (gender === 'female' && (g.includes('female') || g.includes('women')));
-
-    /* Occupation match */
-    const occMatch =
-      o === 'any' ||
-      occupation === '' ||
-      o.includes(occupation) ||
-      occupation.includes(o) ||
-      (o.includes('farmer') && (occupation.includes('farm') || occupation.includes('agri'))) ||
-      (o.includes('student') && (occupation.includes('student') || occupation.includes('study')));
-
-    /* Income guard — if scheme eligibility text mentions income cap */
-    const eligText = (scheme.eligibility || '').toLowerCase();
-    const incomeMatch = (() => {
-      if (income <= 0) return true; // unknown income → don't exclude
-      const capMatch = eligText.match(/(\d[\d,]+)\s*(lakh|,000)/i);
-      if (!capMatch) return true;
-      const raw = capMatch[1].replace(/,/g, '');
-      const cap = capMatch[2].toLowerCase().includes('lakh')
-        ? parseInt(raw, 10) * 100000
-        : parseInt(raw, 10);
-      return income <= cap;
-    })();
-
-    /* Document-gated schemes: if scheme needs caste cert, user must have one verified */
-    const needsCasteCert = eligText.includes('sc') || eligText.includes('st') || eligText.includes('obc') || eligText.includes('caste');
-    const hasCasteCert   = needsCasteCert
-      ? verifiedDocTypes.has('caste_certificate') || verifiedDocTypes.has('aadhaar') || category !== ''
-      : true;
-
-    return catMatch && genderMatch && occMatch && incomeMatch && hasCasteCert;
-  };
-}
+/* ── Eligibility check — loose match: schemes with 'All' in any criterion pass ── */
+const isEligible = (scheme: SchemeItem): boolean => {
+  const b = scheme.beneficiary.toLowerCase();
+  const g = scheme.gender.toLowerCase();
+  const o = scheme.occupation.toLowerCase();
+  const matchBeneficiary = b.includes('all');
+  const matchGender = g === 'any' || g.includes('all');
+  const matchOccupation = o === 'any' || o.includes('all');
+  return matchBeneficiary && matchGender && matchOccupation;
+};
 
 /* ── Schemes Grid ─────────────────────────────────────────── */
-const SchemesGrid: React.FC<{ initialCategory?: string }> = ({ initialCategory }) => {
+const SchemesGrid: React.FC = () => {
   const [schemes, setSchemes] = useState<SchemeItem[]>(ALL_SCHEMES);
   const [loadingSchemes, setLoadingSchemes] = useState(true);
   const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set(['s4', 's6']));
-  const [filterCategory, setFilterCategory] = useState<string>(initialCategory || 'All');
+  const [filterCategory, setFilterCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [showCount, setShowCount] = useState(12);
   const [viewMode, setViewMode] = useState<'all' | 'eligible'>('all');
   const [showFormAnimation, setShowFormAnimation] = useState(false);
   const [applyingScheme, setApplyingScheme] = useState<SchemeItem | null>(null);
-  /* Eligibility state */
-  const [matchedIds, setMatchedIds] = useState<Set<string>>(new Set());
-  const [userProfile, setUserProfile] = useState<Record<string, unknown>>({});
-  const [verifiedDocTypes, setVerifiedDocTypes] = useState<Set<string>>(new Set());
-  const [eligibilityReady, setEligibilityReady] = useState(false);
   const { t } = useLocalization();
-
-  // Sync category filter when navigating from a category tile
-  useEffect(() => {
-    setFilterCategory(initialCategory || 'All');
-    setShowCount(12);
-  }, [initialCategory]);
 
   // Fetch schemes from backend API, fall back to hardcoded
   useEffect(() => {
@@ -725,49 +654,6 @@ const SchemesGrid: React.FC<{ initialCategory?: string }> = ({ initialCategory }
     })();
     return () => { cancelled = true; };
   }, []);
-
-  // Fetch real user profile + verified documents for eligibility checking
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { userAPI, documentsAPI, schemesAPI } = await import('@/services/api');
-
-        // 1. Load user profile
-        const profileRes = await userAPI.getProfile().catch(() => ({ data: {} }));
-        const profile = profileRes.data || {};
-        if (!cancelled) setUserProfile(profile);
-
-        // 2. Load verified documents
-        const docsRes = await documentsAPI.list().catch(() => ({ data: { documents: [] } }));
-        const docs: { document_type: string; status: string }[] = docsRes.data?.documents ?? [];
-        const verifiedTypes = new Set(
-          docs.filter(d => d.status === 'verified' || d.status === 'processed').map(d => d.document_type)
-        );
-        if (!cancelled) setVerifiedDocTypes(verifiedTypes);
-
-        // 3. Ask backend for matched schemes (uses full profile + eligibility engine)
-        const matchRes = await schemesAPI.match().catch(() => ({ data: [] }));
-        const matched: Record<string, unknown>[] = matchRes.data?.matches ?? matchRes.data?.schemes ?? [];
-        if (!cancelled && Array.isArray(matched) && matched.length > 0) {
-          setMatchedIds(new Set(matched.map(s => String(s.scheme_id ?? s.id ?? '')).filter(Boolean)));
-        }
-      } catch { /* silent */ } finally {
-        if (!cancelled) setEligibilityReady(true);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  // Build eligibility checker from real profile + documents
-  const isEligible = React.useMemo(() => {
-    // If backend returned matches, prefer those
-    if (matchedIds.size > 0) {
-      return (scheme: SchemeItem) => matchedIds.has(scheme.id);
-    }
-    // Otherwise fall back to local profile-based check
-    return buildEligibilityChecker(userProfile, verifiedDocTypes);
-  }, [matchedIds, userProfile, verifiedDocTypes]);
 
   const eligibleSchemes = schemes.filter(isEligible);
   const schemeCategories = ['All', ...Array.from(new Set(schemes.map(s => s.category))).sort()];
@@ -842,19 +728,11 @@ const SchemesGrid: React.FC<{ initialCategory?: string }> = ({ initialCategory }
           className="p-4 rounded-xl bg-gradient-to-r from-[#F0FDF4] to-[#ECFDF5] border border-[#22C55E]/20">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-[#22C55E]/15 flex items-center justify-center">
-              {!eligibilityReady
-                ? <Loader2 size={20} className="text-[#22C55E] animate-spin" />
-                : <Zap size={20} className="text-[#22C55E]" />}
+              <Zap size={20} className="text-[#22C55E]" />
             </div>
             <div>
               <p className="text-sm font-bold text-[#166534]">{t('schemes.eligible_banner_title')}</p>
-              {!eligibilityReady
-                ? <p className="text-xs text-[#15803D] mt-0.5">Checking your profile and verified documents…</p>
-                : <p className="text-xs text-[#15803D] mt-0.5">
-                    {eligibleSchemes.length} schemes matched based on your verified profile &amp; documents
-                    {verifiedDocTypes.size > 0 && ` (${verifiedDocTypes.size} doc${verifiedDocTypes.size > 1 ? 's' : ''} verified)`}.
-                  </p>
-              }
+              <p className="text-xs text-[#15803D] mt-0.5">{eligibleSchemes.length} matching schemes found based on your profile.</p>
             </div>
           </div>
         </motion.div>
@@ -1242,6 +1120,8 @@ const AIChatPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, o
   const { messages, addMessage } = useVoiceStore();
   const { language } = useUserStore();
   const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [convId, setConvId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1256,8 +1136,6 @@ const AIChatPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, o
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
-  const [loading, setLoading] = useState(false);
-
   const handleSend = async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -1265,12 +1143,18 @@ const AIChatPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, o
     setInput('');
     setLoading(true);
     try {
-      const { chatAPI } = await import('@/services/api');
-      const res = await chatAPI.sendMessage(text, undefined, language);
-      const reply = res.data?.response || res.data?.message || 'Sorry, I could not process that.';
-      addMessage({ id: generateId(), role: 'assistant', text: reply, timestamp: new Date(), language });
+      const res = await chatAPI.sendMessage(text, convId || undefined, language);
+      const data = res.data;
+      if (data.conversation_id) setConvId(data.conversation_id);
+      addMessage({
+        id: generateId(), role: 'assistant', timestamp: new Date(), language,
+        text: data.message || 'Sorry, I could not process that. Please try again.',
+      });
     } catch {
-      addMessage({ id: generateId(), role: 'assistant', text: 'Something went wrong. Please try again.', timestamp: new Date(), language });
+      addMessage({
+        id: generateId(), role: 'assistant', timestamp: new Date(), language,
+        text: 'Sorry, something went wrong. Please try again.',
+      });
     } finally {
       setLoading(false);
     }
@@ -1330,7 +1214,7 @@ const AIChatPanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open, o
               'w-10 h-10 rounded-xl flex items-center justify-center transition-all shrink-0',
               input.trim() && !loading ? 'bg-[#1a237e] text-white hover:bg-[#283593]' : 'bg-[#e2e8f0] text-[#94a3b8] cursor-not-allowed'
             )}>
-            <Send size={16} />
+            {loading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
           </button>
         </div>
       </div>
@@ -1430,7 +1314,7 @@ const LanguagePanel: React.FC<{ open: boolean; onClose: () => void }> = ({ open,
 };
 
 /* ── Home Tab Content ────────────────────────────────────── */
-const HomeContent: React.FC<{ onNavigate: (tab: Tab) => void; onCategoryNavigate: (cat: string) => void; onNotifications: () => void }> = ({ onNavigate, onCategoryNavigate, onNotifications }) => {
+const HomeContent: React.FC<{ onNavigate: (tab: Tab) => void; onNotifications: () => void }> = ({ onNavigate, onNotifications }) => {
   const { user } = useUserStore();
   const { t } = useLocalization();
   return (
@@ -1456,6 +1340,7 @@ const HomeContent: React.FC<{ onNavigate: (tab: Tab) => void; onCategoryNavigate
         <Search size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#94a3b8]" />
         <input placeholder={t('home.search_placeholder')} className="umang-input pl-12 pr-14 py-4 text-base shadow-sm"
           onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('schemes'); }}
+          onFocus={() => onNavigate('schemes')}
         />
         <button onClick={() => onNavigate('voice')} className="absolute right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg bg-[#FF9933] flex items-center justify-center hover:bg-[#E88A2E] transition-colors cursor-pointer">
           <Mic size={18} className="text-white" />
@@ -1466,7 +1351,7 @@ const HomeContent: React.FC<{ onNavigate: (tab: Tab) => void; onCategoryNavigate
       <BannerCarousel onNavigate={onNavigate} />
 
       {/* Category Grid */}
-      <CategoryGrid onCategoryClick={(cat) => { onCategoryNavigate(cat); }} />
+      <CategoryGrid onCategoryClick={() => onNavigate('schemes')} />
 
       {/* Stats */}
       <StatsRow />
@@ -1504,19 +1389,12 @@ const HomeContent: React.FC<{ onNavigate: (tab: Tab) => void; onCategoryNavigate
 /* ── Main Dashboard ─────────────────────────────────────── */
 export const DashboardScreen: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>('home');
-  const [schemesCategory, setSchemesCategory] = useState<string>('All');
   const [chatOpen, setChatOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showLanguagePicker, setShowLanguagePicker] = useState(false);
   const { user, language } = useUserStore();
   const { t } = useLocalization();
   const currentLang = LANGUAGES.find(l => l.code === language);
-
-  /** Navigate to schemes tab pre-filtered to a specific category */
-  const navigateToCategory = (cat: string) => {
-    setSchemesCategory(cat);
-    setActiveTab('schemes');
-  };
 
   const NAV_TABS: { id: Tab; label: string; icon: typeof Home }[] = [
     { id: 'home', label: t('nav.home'), icon: Home },
@@ -1528,11 +1406,11 @@ export const DashboardScreen: React.FC = () => {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'schemes': return <SchemesGrid initialCategory={schemesCategory} />;
+      case 'schemes': return <SchemesGrid />;
       case 'voice': return <VoiceScreen />;
       case 'documents': return <DocumentsTab />;
       case 'profile': return <ProfileTab />;
-      default: return <HomeContent onNavigate={setActiveTab} onCategoryNavigate={navigateToCategory} onNotifications={() => setShowNotifications(true)} />;
+      default: return <HomeContent onNavigate={setActiveTab} onNotifications={() => setShowNotifications(true)} />;
     }
   };
 
@@ -1560,7 +1438,7 @@ export const DashboardScreen: React.FC = () => {
             {NAV_TABS.map((tab) => {
               const active = activeTab === tab.id;
               return (
-                <button key={tab.id} onClick={() => { if (tab.id === 'schemes') setSchemesCategory('All'); setActiveTab(tab.id); }}
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                   className={cn(
                     'flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all',
                     active ? 'bg-white text-[#1a237e] shadow-sm' : 'text-white/70 hover:text-white hover:bg-white/10'
@@ -1600,7 +1478,7 @@ export const DashboardScreen: React.FC = () => {
           {NAV_TABS.map((tab) => {
             const active = activeTab === tab.id;
             return (
-              <button key={tab.id} onClick={() => { if (tab.id === 'schemes') setSchemesCategory('All'); setActiveTab(tab.id); }}
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)}
                 className={cn(
                   'flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-all',
                   active ? 'bg-white text-[#1a237e]' : 'text-white/60 hover:text-white'
@@ -1680,7 +1558,7 @@ export const DashboardScreen: React.FC = () => {
       </footer>}
 
       {/* ── Floating AI Chat Button (hidden on voice tab) ── */}
-      {activeTab !== 'voice' && (<>
+      {activeTab !== 'voice' && <>
         <AnimatePresence>
           {chatOpen && <AIChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />}
         </AnimatePresence>
@@ -1696,7 +1574,7 @@ export const DashboardScreen: React.FC = () => {
             : <MessageCircle size={22} className="text-white" />
           }
         </motion.button>
-      </>)}
+      </>}
     </div>
   );
 };

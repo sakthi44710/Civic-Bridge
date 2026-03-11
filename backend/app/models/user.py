@@ -55,13 +55,13 @@ class UserProfile(BaseModel):
     education_level: Optional[str] = None
     
     # Identity
-    aadhaar_number: Optional[str] = None
-    pan_number: Optional[str] = None
+    aadhaar_number: Optional[str] = Field(default=None, pattern=r"^\d{12}$")
+    pan_number: Optional[str] = Field(default=None, pattern=r"^[A-Z]{5}[0-9]{4}[A-Z]$")
     
     # Bank Details
     bank_name: Optional[str] = None
-    bank_account: Optional[str] = None
-    ifsc_code: Optional[str] = None
+    bank_account: Optional[str] = Field(default=None, pattern=r"^\d{9,18}$")
+    ifsc_code: Optional[str] = Field(default=None, pattern=r"^[A-Z]{4}0[A-Z0-9]{6}$")
     
     # Timestamps
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -99,3 +99,8 @@ class ProfileUpdate(BaseModel):
     annual_income: Optional[int] = None
     occupation: Optional[str] = None
     education_level: Optional[str] = None
+    aadhaar_number: Optional[str] = Field(default=None, pattern=r"^\d{12}$")
+    pan_number: Optional[str] = Field(default=None, pattern=r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+    bank_name: Optional[str] = None
+    bank_account: Optional[str] = Field(default=None, pattern=r"^\d{9,18}$")
+    ifsc_code: Optional[str] = Field(default=None, pattern=r"^[A-Z]{4}0[A-Z0-9]{6}$")

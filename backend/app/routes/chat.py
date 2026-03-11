@@ -78,6 +78,7 @@ async def send_message(request: ChatRequest, user_id: str = Depends(get_current_
             language=language,
             conversation_id=conversation_id,
             document_context=doc_context,
+            user_id=user_id,
         )
         # Extract message string from dict response
         if isinstance(ai_result, dict):

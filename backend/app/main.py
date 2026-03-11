@@ -37,7 +37,6 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:8080",
         "https://*.amplifyapp.com",
-        "https://d30g9gkj4z2geg.cloudfront.net",
     ],
     allow_credentials=True,
     allow_methods=["*"],

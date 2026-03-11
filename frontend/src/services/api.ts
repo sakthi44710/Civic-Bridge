@@ -1,8 +1,6 @@
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL}/api/v1`
-  : `${window.location.origin}/api/v1`;
+const API_BASE = '/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -46,6 +44,10 @@ export const userAPI = {
   getProfile: () => api.get('/users/me'),
   updateProfile: (data: Record<string, unknown>) => api.put('/users/me', data),
   getDashboard: () => api.get('/users/me/dashboard'),
+  updateKnownDetail: (field_name: string, value: string) =>
+    api.put('/users/me/known-details', { field_name, value }),
+  deleteKnownDetail: (field_name: string) =>
+    api.delete(`/users/me/known-details/${encodeURIComponent(field_name)}`),
 };
 
 // Chat API

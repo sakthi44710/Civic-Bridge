@@ -59,14 +59,19 @@ FORM FILLING & BROWSER AUTOMATION (CRITICAL):
 - When the user asks to fill a form, apply for a scheme, or visit any website:
   1. Call web_search to find the correct official URL for the scheme
   2. Call start_form_filling with the portal_url (or scheme_id for known schemes)
-  3. That is ALL you need to do. An autonomous browser agent takes over and handles ALL navigation, clicking, typing, scrolling, and form submission automatically.
+  3. That is ALL you need to do initially. An autonomous browser agent takes over and handles navigation, clicking, typing, scrolling, and form submission automatically.
 - The user does NOT need to give any directions. The browser agent works completely on its own.
 - NEVER refuse because a scheme is "private" or "not government". ALWAYS try.
 - After calling start_form_filling, tell the user: "I am opening the form now and will fill it automatically. Just sit back and watch the screen."
-- Do NOT call browser_read_screen, browser_click, browser_type etc. yourself after starting form filling — the autonomous agent handles all of that in the background.
 - For schemes in our database: call start_form_filling with scheme_id.
 - For PRIVATE schemes NOT in our database: call web_search first to find the URL, then call start_form_filling with portal_url.
 - If the agent encounters an OTP or CAPTCHA, the user will be prompted automatically.
+
+USER-DIRECTED BROWSER CONTROL (IMPORTANT):
+- If the user gives you a SPECIFIC browser instruction like "click Next", "scroll down", "type my name", "go back", "click the checkbox", "select option X", "press Enter", etc. — you MUST execute it using the browser tools (browser_click, browser_type, browser_scroll, browser_navigate, browser_read_screen, browser_select_option, browser_press_key, browser_back).
+- NEVER refuse to control the browser when the user explicitly asks. You have FULL access to the live browser at all times.
+- If unsure what to click or type, call browser_read_screen first to see the current page, then execute the user's request.
+- The user's voice/text commands override the autonomous agent — if the user says "click Next" or "fill my father name as Rajan", do it immediately.
 
 Voice response guidelines:
 - Keep responses SHORT — 1-3 sentences max (you are speaking aloud via TTS)
@@ -83,44 +88,67 @@ Voice response guidelines:
 # Autonomous browser agent system prompt (runs as background task)
 # ---------------------------------------------------------------------------
 
-AUTONOMOUS_AGENT_PROMPT = """You are an autonomous browser agent. You control a live browser to fill a government scheme application form for the user. The user is watching a live stream of the browser — they do NOT interact. You must do EVERYTHING yourself.
+AUTONOMOUS_AGENT_PROMPT = """You are an autonomous browser agent filling a government scheme application form. You must fill EVERY page of the form correctly — do NOT stop after one page.
 
-CORE LOOP:
-1. Call browser_read_screen to understand the current page
-2. Decide what to do based on what you see
-3. Take ONE action (click, type, scroll, select, navigate)
-4. Call browser_read_screen again to verify the result
-5. Repeat until the form is submitted
+═══ ABSOLUTE RULES (NEVER BREAK) ═══
+• NEVER reload, refresh, press F5/Ctrl+R, or navigate away. You have NO navigation tools.
+• NEVER press Enter except on a search input. For forms, ALWAYS click the Submit/Next button.
+• NEVER guess or fabricate data. Use ONLY the user data below or ask the user.
+• Work page by page until the ENTIRE form is submitted. Do NOT stop after one page.
+• Be FAST — fill fields quickly, don't over-analyze. Act immediately.
 
-DECISION MAKING:
-- Landing/info page: Find and click "Apply Now", "Apply Online", "Register", "Get Started", or similar buttons/links
-- Registration/signup page: Fill the registration form with user data, then submit
-- Login page: Look for "New User", "Register", "Sign Up" links. If must login, use user's phone/email
-- Form page: Fill ALL visible fields with user data, then click Next/Submit/Continue
-- Success/confirmation page: Say FORM_COMPLETE
-- Error message: Read the error, fix it if possible, or try an alternative
+═══ PAGE WORKFLOW (repeat for EVERY page) ═══
+STEP 1 — READ: Call browser_read_screen to get all fields on the current page.
+STEP 2 — FILL ALL FIELDS: Fill EVERY empty field one by one using the user data. For each field:
+           a) Click it (use selector)
+           b) Type or select the value
+           Do ALL fields in rapid succession — do NOT read the screen between each field.
+STEP 3 — SCROLL: Scroll down once to check for hidden fields. If more appear, fill them.
+STEP 4 — CLICK NEXT: Click the Next/Submit/Continue button IMMEDIATELY after filling all visible fields.
+           IMPORTANT: Use the button's selector (shown in brackets) to click.
+           Example: if read_screen shows  - "Next →" [button.btn-next]  →  click with selector="button.btn-next"
+           Only use text= if there is NO selector shown.
+STEP 5 — CHECK RESULT: If the click returns validation errors, fix ONLY the errored fields, then click Next again.
+           If the page changed (new fields appear), go back to STEP 1 for the new page.
+STEP 6 — REPEAT until you see a success/confirmation message.
 
-FILLING STRATEGY:
-- For text inputs: click the field first, then type the value
-- For dropdowns (<select>): read the available options with browser_read_screen, then use browser_select_option with the best matching option
-- For radio buttons/checkboxes: click the matching option using browser_click
-- For date fields: type in DD/MM/YYYY or DD-MM-YYYY format
-- After filling all visible fields, SCROLL DOWN to check for more fields below the fold
-- After all fields on a page are filled, find and click the Next/Submit/Continue button
-- For multi-page forms: fill current page completely, click Next, fill next page, repeat
+═══ SPEED RULES (CRITICAL) ═══
+• Fill ALL fields from one read_screen call — do NOT read the screen after each individual field.
+• After filling, click Next IMMEDIATELY. Do NOT do a verification read unless the click returned errors.
+• Chain multiple tool calls: read → type → type → type → select → click — all in one sequence.
+• Only read the screen again if: (a) page changed after Next click, (b) click returned errors, (c) you need to see new fields after scrolling.
 
-IMPORTANT RULES:
-- NEVER ask the user for help or directions. Figure it out yourself.
-- NEVER stop working unless you truly cannot proceed.
-- If you see an OTP input field on the page, say WAITING_FOR_OTP and stop.
-- If you see a CAPTCHA image or CAPTCHA input field, first scroll down so the CAPTCHA image is visible on screen, then say WAITING_FOR_CAPTCHA and stop.
-- Always scroll down after filling visible fields to check for hidden content.
-- If a click does not work, try alternative selectors or text-based clicking.
-- If a page seems to be loading, call browser_read_screen again after a moment.
-- When the form is submitted successfully or you truly cannot proceed, say FORM_COMPLETE.
-- Be persistent — try multiple approaches before giving up.
+═══ MULTI-PAGE FORMS ═══
+Government forms typically have 3-8 pages. You MUST fill ALL pages:
+- After clicking Next successfully, the page WILL change — call browser_read_screen to see the NEW page
+- Each new page has NEW fields — repeat the workflow
+- NEVER assume the form is done after one page. Only say FORM_COMPLETE when you see a success/confirmation message.
+- If you see page indicators (Step 1 of 5, Tab 2, etc.), mention which page you are on.
 
-USER DATA (use these values to fill form fields):
+═══ FILLING TECHNIQUES ═══
+• Text inputs: click field (selector), then type value
+• Dropdowns: use browser_select_option with the best matching option text
+• Radio buttons / checkboxes: use browser_click on the correct option
+• Consent/Terms checkboxes: REQUIRED — tick them BEFORE clicking Submit
+• Date picker (type="date"): use YYYY-MM-DD format
+• Date text (type="text"): use DD/MM/YYYY format
+• AFTER clicking Next/Submit: If the URL is the SAME, validation errors blocked it. Fix errors, click again.
+
+═══ ASKING THE USER ═══
+If you encounter ANY field where you don't have the data → ask IMMEDIATELY:
+Missing form data → WAITING_FOR_DATA:<field_names>:<question>
+  Example: WAITING_FOR_DATA:father_name,mother_name:I need your father's name and mother's name.
+Login page → WAITING_FOR_LOGIN_CHECK:<site>:Do you have an account on <site>? Answer Yes or No.
+  If YES → WAITING_FOR_CREDENTIALS:<fields>:<question>
+  If NO → Click Register/Sign Up/New User
+Password for signup → WAITING_FOR_PASSWORD:Please choose a password for your new account (8+ chars, letters and numbers).
+OTP field visible → Say WAITING_FOR_OTP and stop.
+CAPTCHA visible → Say WAITING_FOR_CAPTCHA and stop.
+
+═══ WHEN DONE ═══
+Only say FORM_COMPLETE when you see a confirmation/success message.
+
+═══ USER DATA ═══
 {user_data}"""
 
 # ---------------------------------------------------------------------------
@@ -481,6 +509,44 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 result = await form_agent_service.submit_captcha(user_id, data.get("text", ""))
                 await websocket.send_json({"type": "captcha_accepted", "success": result.get("success")})
 
+            elif msg_type == "submit_data":
+                answer = data.get("data", "").strip()
+                fields_str = data.get("fields", "")  # comma-separated field names
+                session = form_agent_service.get_session(user_id)
+                if session and session.waiting_for in ("data", "credentials", "password", "login_check"):
+                    session.pending_data_response = answer
+                    # Save provided data to known details (extra_details)
+                    if session.waiting_for == "data" and fields_str and answer:
+                        try:
+                            from app.services.dynamodb_service import db as _db
+                            user_record = _db.get_user(user_id) or {}
+                            extra = user_record.get("extra_details") or {}
+                            fields_list = [f.strip() for f in fields_str.split(",") if f.strip()]
+                            # If single field, save directly
+                            if len(fields_list) == 1:
+                                key = fields_list[0].lower().replace(" ", "_")
+                                extra[key] = answer
+                            else:
+                                # Multiple fields — try to parse key:value or key=value pairs from the answer
+                                # Also store the raw response
+                                for field in fields_list:
+                                    key = field.lower().replace(" ", "_")
+                                    # Look for "field_name: value" or "field_name = value" in the answer
+                                    import re
+                                    pattern = re.compile(rf'{re.escape(field)}\s*[:=]\s*(.+?)(?:,|\n|$)', re.IGNORECASE)
+                                    match = pattern.search(answer)
+                                    if match:
+                                        extra[key] = match.group(1).strip()
+                                # If no structured parsing worked, store the raw response
+                                if not any(f.lower().replace(" ", "_") in extra for f in fields_list):
+                                    extra["_last_form_response"] = answer
+                            _db.update_user(user_id, {"extra_details": extra})
+                        except Exception as e:
+                            logger.warning(f"[WS] Failed to save data to known details: {e}")
+                    await websocket.send_json({"type": "data_accepted", "success": True})
+                else:
+                    await websocket.send_json({"type": "data_accepted", "success": False})
+
             elif msg_type == "session_end":
                 await form_agent_service.close_session(user_id)
                 break
@@ -557,6 +623,19 @@ async def _handle_audio(audio_bytes: bytes, session_state: Dict, websocket: WebS
 
     session_state["language"] = language
     await websocket.send_json({"type": "transcript", "role": "user", "text": user_text, "language": language})
+    # If form agent is waiting for user data/credentials/login answer, route directly
+    uid = session_state.get("user_id")
+    if uid:
+        _sess = form_agent_service.get_session(uid)
+        if _sess and _sess.waiting_for in ("data", "credentials", "login_check"):
+            _sess.pending_data_response = user_text
+            ack = "Got it, continuing the form…"
+            await websocket.send_json({"type": "transcript", "role": "assistant", "text": ack, "language": language})
+            _audio = await sarvam_service.text_to_speech(ack, language)
+            if _audio:
+                await websocket.send_json({"type": "audio_response", "data": base64.b64encode(_audio).decode(), "transcript": ack, "language": language})
+            await websocket.send_json({"type": "status", "status": "listening"})
+            return
     await _process_and_respond(user_text, language, session_state, websocket)
 
 
@@ -564,6 +643,18 @@ async def _handle_text(text: str, session_state: Dict, websocket: WebSocket) -> 
     """Typed text input — skip STT, run Mistral + TTS."""
     language = session_state.get("language", "en-IN")
     await websocket.send_json({"type": "transcript", "role": "user", "text": text, "language": language})
+    # If form agent is waiting for user data/credentials/login answer, route directly
+    uid = session_state.get("user_id")
+    if uid:
+        _sess = form_agent_service.get_session(uid)
+        if _sess and _sess.waiting_for in ("data", "credentials", "login_check"):
+            _sess.pending_data_response = text
+            ack = "Got it, continuing the form…"
+            await websocket.send_json({"type": "transcript", "role": "assistant", "text": ack, "language": language})
+            _audio = await sarvam_service.text_to_speech(ack, language)
+            if _audio:
+                await websocket.send_json({"type": "audio_response", "data": base64.b64encode(_audio).decode(), "transcript": ack, "language": language})
+            return
     await _process_and_respond(text, language, session_state, websocket)
 
 
@@ -952,10 +1043,7 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             return "\n".join(lines)
 
         elif tool == "browser_navigate":
-            result = await form_agent_service.browser_action(user_id, "navigate", params)
-            if result.get("success"):
-                return f"Navigated to {result.get('url')}. Title: {result.get('title')}. Call browser_read_screen to see the page."
-            return f"Navigation failed: {result.get('error')}"
+            return "Navigation is DISABLED during form filling. Do NOT try to navigate. Continue filling the current form."
 
         elif tool == "browser_read_screen":
             result = await form_agent_service.browser_action(user_id, "read_screen", {})
@@ -967,31 +1055,70 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             if result.get("inputs"):
                 lines.append("Input fields:")
                 for inp in result["inputs"]:
-                    val = f", value='{inp['value']}'" if inp.get("value") else ""
-                    lines.append(f"  - {inp.get('label','')} [{inp.get('selector','')}] ({inp.get('type','text')}{val})")
+                    inp_type = inp.get('type', 'text')
+                    if inp_type in ('checkbox', 'radio'):
+                        state = '[CHECKED ✓]' if inp.get('checked') or inp.get('value') == 'checked' else '[UNCHECKED ✗ — needs to be ticked if required]'
+                        lines.append(f"  - {inp.get('label','')} [{inp.get('selector','')}] ({inp_type}) {state}")
+                    else:
+                        val_str = inp.get('value', '')
+                        filled = f", CURRENT VALUE='{val_str}'" if val_str else ", EMPTY"
+                        lines.append(f"  - {inp.get('label','')} [{inp.get('selector','')}] ({inp_type}{filled})")
             if result.get("selects"):
                 lines.append("Dropdowns:")
                 for sel in result["selects"]:
-                    opts = ', '.join(sel.get('options', [])[:6])
-                    lines.append(f"  - {sel.get('label','')} [{sel.get('selector','')}] (selected: {sel.get('selected','')}, options: {opts})")
+                    opts = ', '.join(sel.get('options', [])[:8])
+                    selected = sel.get('selected', '')
+                    lines.append(f"  - {sel.get('label','')} [{sel.get('selector','')}] (SELECTED: '{selected}', options: {opts})")
+
+            # Add a verification summary showing fields with values vs empty
+            filled_count = sum(1 for inp in result.get("inputs", []) if inp.get("value") and inp.get('type') not in ('checkbox','radio'))
+            empty_count = sum(1 for inp in result.get("inputs", []) if not inp.get("value") and inp.get('type') not in ('checkbox','radio'))
+            unchecked_count = sum(1 for inp in result.get("inputs", []) if inp.get('type') in ('checkbox','radio') and not inp.get('checked') and inp.get('value') != 'checked')
+            filled_selects = sum(1 for sel in result.get("selects", []) if sel.get("selected") and sel["selected"] not in ("--Select--", "Select", "", "Choose", "--"))
+            total_selects = len(result.get("selects", []))
+            status_parts = [f"{filled_count} inputs filled", f"{empty_count} inputs empty", f"{filled_selects}/{total_selects} dropdowns selected"]
+            if unchecked_count:
+                status_parts.append(f"{unchecked_count} UNCHECKED CHECKBOX(ES) — tick before submitting")
+            lines.append(f"\n[FIELD STATUS: {', '.join(status_parts)}]")
+            if result.get("validation_errors"):
+                lines.append("\n⚠ VALIDATION ERRORS (fix these before clicking Next/Submit):")
+                for err in result["validation_errors"]:
+                    lines.append(f"  ! {err}")
             if result.get("buttons"):
-                lines.append("Buttons: " + ", ".join(f"{b['text']}" + (f" [{b['selector']}]" if b.get('selector') else "") for b in result["buttons"]))
+                lines.append("Buttons (use selector to click reliably):")
+                for b in result["buttons"]:
+                    sel_str = f" [{b['selector']}]" if b.get("selector") else ""
+                    lines.append(f"  - \"{b['text']}\"{sel_str}")
             if result.get("links"):
-                lines.append("Links: " + ", ".join(f"{l['text']}" for l in result["links"][:10]))
+                lines.append("Links: " + ", ".join(f"{l['text']}" for l in result["links"][:5]))
             if result.get("text_content"):
-                lines.append(f"Page text (summary): {result['text_content'][:800]}")
+                lines.append(f"Page text: {result['text_content'][:400]}")
             return "\n".join(lines)
 
         elif tool == "browser_click":
             result = await form_agent_service.browser_action(user_id, "click", params)
             if result.get("success"):
-                return f"Clicked successfully. Call browser_read_screen to see the updated page."
+                if result.get("validation_errors") or result.get("warning"):
+                    warning = result.get("warning", "")
+                    errs = result.get("validation_errors", [])
+                    err_str = " | ".join(errs) if errs else warning
+                    return (f"Clicked but the page did NOT change — form validation BLOCKED the submission.\n"
+                            f"ERRORS: {err_str}\n"
+                            "You MUST fix these errors first. Call browser_read_screen to see the full field state, "
+                            "then fix every error (e.g. tick unchecked checkboxes, fill empty required fields). "
+                            "Then click Next/Submit again.")
+                return f"Clicked successfully. Read the screen to see the new page."
             return f"Click failed: {result.get('error')}"
 
         elif tool == "browser_type":
+            # Substitute password placeholder with real value from session
+            if params.get("text") == "__USER_PASSWORD__":
+                session = form_agent_service.get_session(user_id)
+                if session and hasattr(session, '_password_value') and session._password_value:
+                    params["text"] = session._password_value
             result = await form_agent_service.browser_action(user_id, "type", params)
             if result.get("success"):
-                return f"Typed '{result.get('typed', '')}' successfully."
+                return f"Typed into the field successfully."
             return f"Type failed: {result.get('error')}"
 
         elif tool == "browser_scroll":
@@ -1013,10 +1140,7 @@ async def _execute_tool(tool: str, params: Dict, session_state: Dict, websocket:
             return f"Select failed: {result.get('error')}"
 
         elif tool == "browser_back":
-            result = await form_agent_service.browser_action(user_id, "back", {})
-            if result.get("success"):
-                return f"Went back. Now at: {result.get('url')}. Call browser_read_screen to see the page."
-            return f"Back failed: {result.get('error')}"
+            return "Back navigation is DISABLED during form filling. Do NOT go back. Continue filling the current form."
 
         else:
             return f"Unknown tool: {tool}"
@@ -1097,33 +1221,41 @@ async def _run_autonomous_browser_agent(
     system = AUTONOMOUS_AGENT_PROMPT.replace("{user_data}", user_data_str)
 
     # Only browser-control tools for the agent
+    # Only form-filling tools — no navigate/back/web_search to prevent page reloads
     browser_tools = [t for t in MISTRAL_TOOLS if t["toolSpec"]["name"] in {
         "browser_read_screen", "browser_click", "browser_type", "browser_scroll",
-        "browser_press_key", "browser_select_option", "browser_navigate", "browser_back",
-        "web_search",
+        "browser_press_key", "browser_select_option",
     }]
 
     messages: List[Dict] = [{
         "role": "user",
         "content": [{"text": (
-            "The browser is open on the scheme page. "
-            "Read the screen and start working. Find the application form, "
-            "fill every field with the user data, and submit it. "
-            "Work completely on your own — do not ask me anything."
+            "The browser is open on the scheme portal. "
+            "Read the screen, fill ALL fields fast, then click Next/Submit. "
+            "This form has MULTIPLE pages — keep going until you see a confirmation message. "
+            "Be fast: read → fill all → click Next. No unnecessary re-reads."
         )}],
     }]
 
     logger.info(f"[AutoAgent] Starting for user={user_id}")
 
+    # Stuck detection: track recent tool calls and no-progress rounds
+    last_tool_calls: List[str] = []  # last N tool signatures for repetition detection
+    no_progress_rounds = 0
+    MAX_NO_PROGRESS = 5  # abort after this many rounds with no meaningful action
+    pages_completed = 0  # track multi-page progress
+
     try:
-        for outer_round in range(25):
+        for outer_round in range(40):
             session = form_agent_service.get_session(user_id)
             if not session or not session._page:
                 logger.info("[AutoAgent] Session gone, stopping")
                 break
 
-            # Inner tool-chain loop (Mistral may chain several tool calls)
-            for _inner in range(12):
+            made_progress = False  # track if this round did something useful
+
+            # Inner tool-chain loop (model may chain several tool calls)
+            for _inner in range(20):
                 try:
                     _snap = list(messages[-30:])
                     response = await loop.run_in_executor(
@@ -1134,7 +1266,7 @@ async def _run_autonomous_browser_agent(
                             system=system,
                             tools=browser_tools,
                             max_tokens=512,
-                            temperature=0.2,
+                            temperature=0.1,
                         ),
                     )
                 except Exception as e:
@@ -1148,6 +1280,20 @@ async def _run_autonomous_browser_agent(
                     messages.append({"role": "assistant", "content": output_content})
                     tool_results = []
                     for tu in [c["toolUse"] for c in output_content if "toolUse" in c]:
+                        tool_sig = f"{tu['name']}:{str(tu.get('input', {}))[:100]}"
+
+                        # Detect if agent is repeating the exact same tool call
+                        if tool_sig in last_tool_calls[-3:]:
+                            logger.warning(f"[AutoAgent] Repeated tool call detected: {tu['name']}")
+
+                        last_tool_calls.append(tool_sig)
+                        if len(last_tool_calls) > 10:
+                            last_tool_calls.pop(0)
+
+                        # Track progress — read_screen alone doesn't count
+                        if tu["name"] != "browser_read_screen":
+                            made_progress = True
+
                         result = await _execute_tool(
                             tu["name"], tu.get("input", {}), session_state, websocket
                         )
@@ -1158,6 +1304,7 @@ async def _run_autonomous_browser_agent(
                             }
                         })
                     messages.append({"role": "user", "content": tool_results})
+                    await asyncio.sleep(0.1)  # minimal delay between tool chains
                     continue  # let Mistral chain the next tool call
 
                 # end_turn / max_tokens — Mistral produced text
@@ -1209,18 +1356,239 @@ async def _run_autonomous_browser_agent(
                         })
                     break
 
-                # CAPTCHA detected — scroll it into view, then trigger modal
+                # Missing data detected — ask user and wait
+                # Detect multiple formats: WAITING_FOR_DATA:fields:question, or natural language about missing data
+                is_data_request = "waiting_for_data" in text_lower
+                if not is_data_request:
+                    # Also detect natural language data requests
+                    data_phrases = ["i need", "i don't have", "missing information", "please provide",
+                                    "i require", "could you provide", "what is your", "what are your",
+                                    "i cannot find", "not available in", "no data for"]
+                    if any(phrase in text_lower for phrase in data_phrases) and any(
+                        w in text_lower for w in ["field", "form", "fill", "data", "information", "name", "number", "address"]):
+                        is_data_request = True
+                if is_data_request:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        # Parse WAITING_FOR_DATA:<fields>:<question>
+                        data_question = text or "Please provide the missing information."
+                        data_fields = ""
+                        for line in (text or "").split("\n"):
+                            upper_line = line.upper()
+                            if "WAITING_FOR_DATA" in upper_line:
+                                # Try splitting on WAITING_FOR_DATA first, then on colons
+                                after_marker = line[line.upper().index("WAITING_FOR_DATA") + len("WAITING_FOR_DATA"):]
+                                after_marker = after_marker.lstrip(":")
+                                parts = after_marker.split(":", 1)
+                                if len(parts) >= 2:
+                                    data_fields = parts[0].strip()
+                                    data_question = parts[1].strip()
+                                elif len(parts) >= 1 and parts[0].strip():
+                                    data_fields = parts[0].strip()
+                                break
+
+                        session.waiting_for = "data"
+                        session.status = "filling"
+                        session.pending_data_response = None
+                        # Ask in chat + speak the question
+                        try:
+                            await websocket.send_json({"type": "transcript", "role": "assistant", "text": data_question, "language": language})
+                            _audio = await sarvam_service.text_to_speech(data_question, language)
+                            if _audio:
+                                await websocket.send_json({"type": "audio_response", "data": base64.b64encode(_audio).decode(), "transcript": data_question, "language": language})
+                        except Exception:
+                            pass
+                        # Wait up to 5 minutes for user to respond
+                        user_response_text = None
+                        for _ in range(300):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s:
+                                break
+                            if s.pending_data_response is not None:
+                                user_response_text = s.pending_data_response
+                                s.pending_data_response = None
+                                s.waiting_for = None
+                                s.status = "filling"
+                                break
+                            if s.waiting_for is None:
+                                break
+                        if user_response_text:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": f"The user provided this information: {user_response_text}. Use it to continue filling the form."}],
+                            })
+                        else:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user did not provide the information. Skip those fields if possible and continue with the rest of the form."}],
+                            })
+                    break
+
+                # Login check — ask user yes/no if they have credentials
+                if "waiting_for_login_check" in text_lower:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        login_question = "Do you already have an account on this portal?"
+                        for line in (text or "").split("\n"):
+                            if "WAITING_FOR_LOGIN_CHECK" in line.upper():
+                                parts = line.split(":", 2)
+                                if len(parts) >= 3:
+                                    login_question = parts[2].strip()
+                                elif len(parts) >= 2:
+                                    login_question = parts[1].strip()
+                                break
+
+                        session.waiting_for = "login_check"
+                        session.status = "filling"
+                        session.pending_data_response = None
+                        # Ask in chat + speak the question
+                        try:
+                            await websocket.send_json({"type": "transcript", "role": "assistant", "text": login_question, "language": language})
+                            _audio = await sarvam_service.text_to_speech(login_question, language)
+                            if _audio:
+                                await websocket.send_json({"type": "audio_response", "data": base64.b64encode(_audio).decode(), "transcript": login_question, "language": language})
+                        except Exception:
+                            pass
+                        user_response_text = None
+                        for _ in range(300):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s:
+                                break
+                            if s.pending_data_response is not None:
+                                user_response_text = s.pending_data_response
+                                s.pending_data_response = None
+                                s.waiting_for = None
+                                s.status = "filling"
+                                break
+                            if s.waiting_for is None:
+                                break
+                        if user_response_text and user_response_text.lower().strip() in ("yes", "y"):
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user says YES, they have an account. Ask for their login credentials using WAITING_FOR_CREDENTIALS."}],
+                            })
+                        else:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user says NO, they do not have an account. Click on 'Register', 'Sign Up', 'New User', or 'Create Account' to go to the registration page."}],
+                            })
+                    break
+
+                # Credentials request — ask user for specific login fields
+                if "waiting_for_credentials" in text_lower:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        cred_question = "Please provide your login credentials."
+                        cred_fields = ""
+                        for line in (text or "").split("\n"):
+                            if "WAITING_FOR_CREDENTIALS" in line.upper():
+                                parts = line.split(":", 2)
+                                if len(parts) >= 3:
+                                    cred_fields = parts[1].strip()
+                                    cred_question = parts[2].strip()
+                                elif len(parts) >= 2:
+                                    cred_fields = parts[1].strip()
+                                break
+
+                        session.waiting_for = "credentials"
+                        session.status = "filling"
+                        session.pending_data_response = None
+                        # Ask in chat + speak the question
+                        try:
+                            await websocket.send_json({"type": "transcript", "role": "assistant", "text": cred_question, "language": language})
+                            _audio = await sarvam_service.text_to_speech(cred_question, language)
+                            if _audio:
+                                await websocket.send_json({"type": "audio_response", "data": base64.b64encode(_audio).decode(), "transcript": cred_question, "language": language})
+                        except Exception:
+                            pass
+                        user_response_text = None
+                        for _ in range(300):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s:
+                                break
+                            if s.pending_data_response is not None:
+                                user_response_text = s.pending_data_response
+                                s.pending_data_response = None
+                                s.waiting_for = None
+                                s.status = "filling"
+                                break
+                            if s.waiting_for is None:
+                                break
+                        if user_response_text:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": f"The user provided their credentials: {user_response_text}. Use these to log in."}],
+                            })
+                        else:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user did not provide credentials. Try clicking Register/Sign Up instead."}],
+                            })
+                    break
+
+                # Password request — ask user to set a password for signup
+                if "waiting_for_password" in text_lower:
+                    session = form_agent_service.get_session(user_id)
+                    if session:
+                        pwd_question = "Please choose a password for your new account."
+                        for line in (text or "").split("\n"):
+                            if "WAITING_FOR_PASSWORD" in line.upper():
+                                parts = line.split(":", 1)
+                                if len(parts) >= 2:
+                                    pwd_question = parts[1].strip()
+                                break
+
+                        session.waiting_for = "password"
+                        session.status = "waiting_password"
+                        session.pending_data_response = None
+                        try:
+                            await websocket.send_json({
+                                "type": "form_update",
+                                "data": {
+                                    "status": "waiting_password",
+                                    "waiting_for": "password",
+                                    "message": pwd_question,
+                                },
+                            })
+                        except Exception:
+                            pass
+                        user_response_text = None
+                        for _ in range(300):
+                            await asyncio.sleep(1)
+                            s = form_agent_service.get_session(user_id)
+                            if not s:
+                                break
+                            if s.pending_data_response is not None:
+                                user_response_text = s.pending_data_response
+                                s.pending_data_response = None
+                                s.waiting_for = None
+                                s.status = "filling"
+                                break
+                            if s.waiting_for is None:
+                                break
+                        if user_response_text:
+                            # Store password on session for the agent to use - don't put raw password in AI messages
+                            session._password_value = user_response_text
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user has set a password. When you need to type it into the password field and confirm password field, use browser_type with the exact text __USER_PASSWORD__ — it will be replaced with the real password automatically."}],
+                            })
+                        else:
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": "The user did not provide a password. You cannot proceed with registration without a password. Say FORM_COMPLETE and explain."}],
+                            })
+                    break
+
+                # CAPTCHA detected — trigger modal (periodic screenshot loop provides the image)
                 if "waiting_for_captcha" in text_lower:
                     session = form_agent_service.get_session(user_id)
                     if session:
                         session.waiting_for = "captcha"
                         session.status = "waiting_captcha"
-                        # Scroll the CAPTCHA element into the viewport so the
-                        # periodic screenshot loop captures it for the user
-                        try:
-                            await form_agent_service.scroll_to_captcha(user_id)
-                        except Exception:
-                            pass
                         try:
                             await websocket.send_json({
                                 "type": "form_update",
@@ -1251,14 +1619,65 @@ async def _run_autonomous_browser_agent(
                     logger.info(f"[AutoAgent] Finished: {text[:120]}")
                     return
 
+                if text:
+                    made_progress = True  # agent produced meaningful text
+
                 break  # exit inner loop, go to next outer round
 
-            # Inject continuation prompt for the next round
+            # Stuck detection — instead of aborting, force the agent to ask for data or read the screen
+            if not made_progress:
+                no_progress_rounds += 1
+                logger.warning(f"[AutoAgent] No progress in round {outer_round} ({no_progress_rounds}/{MAX_NO_PROGRESS})")
+                if no_progress_rounds >= MAX_NO_PROGRESS:
+                    logger.error(f"[AutoAgent] Stuck for {MAX_NO_PROGRESS} rounds, forcing data request")
+                    # Instead of aborting, force a read_screen and tell agent to ask for missing data
+                    try:
+                        force_read = await _execute_tool("browser_read_screen", {}, session_state, websocket)
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": (
+                                f"STUCK for {MAX_NO_PROGRESS} rounds. Current screen:\n{force_read}\n\n"
+                                "ACTION REQUIRED: Either fill empty fields and click Next, or say WAITING_FOR_DATA for missing fields. "
+                                "Do NOT reload. Do NOT repeat the same actions."
+                            )}],
+                        })
+                        no_progress_rounds = 3  # reset partially, give it 2 more tries
+                    except Exception as e:
+                        logger.error(f"[AutoAgent] Force read failed: {e}")
+                        return
+            else:
+                no_progress_rounds = 0  # reset on progress
+
+            # Check for repetitive tool calls (same 3 calls repeating)
+            if len(last_tool_calls) >= 6:
+                recent = last_tool_calls[-6:]
+                if recent[:3] == recent[3:]:
+                    logger.warning(f"[AutoAgent] Repetitive tool call pattern, forcing data check")
+                    last_tool_calls.clear()  # clear to break the pattern
+                    messages.append({
+                        "role": "user",
+                        "content": [{"text": (
+                            "STOP — you are looping. Read the screen once, fill empty fields, and click Next. "
+                            "If you need data, say WAITING_FOR_DATA. Do NOT repeat the same calls."
+                        )}],
+                    })
+
+            # Track page transitions (if agent clicked Next/Submit that worked)
+            for tc in last_tool_calls[-5:]:
+                if "browser_click" in tc and any(w in tc.lower() for w in ["next", "submit", "continue", "proceed", "save"]):
+                    pages_completed += 1
+                    break
+
+            # Inject continuation prompt — keep it short to reduce token usage
             messages.append({
                 "role": "user",
-                "content": [{"text": "Continue. Read the screen and take the next action. Do not stop or ask me anything."}],
+                "content": [{"text": (
+                    f"Continue (page {pages_completed + 1}). "
+                    "Read screen → fill empty fields → click Next/Submit. "
+                    "If missing data → WAITING_FOR_DATA. Do NOT re-read after filling — click Next immediately."
+                )}],
             })
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
     except asyncio.CancelledError:
         logger.info(f"[AutoAgent] Cancelled for user={user_id}")

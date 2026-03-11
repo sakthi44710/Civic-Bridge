@@ -29,9 +29,8 @@ class Settings(BaseSettings):
     DOCUMENTS_BUCKET: str = "civicbridge-documents"
     SCREENSHOTS_BUCKET: str = "civicbridge-screenshots"
     
-    # AI — Primary + Fallback via Bedrock
+    # AI — Mistral Large 3 via Bedrock (ap-south-1)
     BEDROCK_MODEL_ID: str = "mistral.mistral-large-3-675b-instruct"
-    BEDROCK_FALLBACK_MODEL_ID: str = "mistral.mistral-large-2402-v1:0"
     BEDROCK_API_KEY: str = ""          # Bearer token auth (alternative to IAM)
     BEDROCK_API_REGION: str = "ap-south-1"
     
@@ -43,10 +42,9 @@ class Settings(BaseSettings):
     # Sarvam AI — Indian language STT + TTS
     SARVAM_API_KEY: str = ""             # From sarvam.ai dashboard
 
-    # Twilio SMS OTP
-    TWILIO_ACCOUNT_SID: str = ""
-    TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_PHONE_NUMBER: str = ""
+    # AWS SNS OTP (Twilio removed)
+    SNS_SENDER_ID: str = "CivicBridge"
+    PHONE_COUNTRY_PREFIX: str = "+91"
 
     # Live browser (noVNC)
     DISPLAY: str = ":99"

@@ -78,8 +78,9 @@ class FormFillingSession:
     total_fields: int = 0
 
     # State tracking
-    status: str = "idle"        # idle|started|filling|waiting_otp|waiting_captcha|done|error
-    waiting_for: Optional[str] = None   # None | 'otp' | 'captcha'
+    status: str = "idle"        # idle|started|filling|waiting_otp|waiting_captcha|waiting_data|done|error
+    waiting_for: Optional[str] = None   # None | 'otp' | 'captcha' | 'data' | 'login_check' | 'credentials' | 'password'
+    pending_data_response: Optional[str] = None  # User's response when waiting_for == 'data'
     current_page: int = 1
     total_pages: int = 1
     page_name: str = ""
@@ -377,6 +378,9 @@ class FormAgentService:
         if filled_count < session.total_fields and canonical_data:
             self._ai_fill_remaining(session, canonical_data)
 
+        # Auto-upload documents for file input fields
+        self._auto_upload_documents(session)
+
         # Check for CAPTCHA after auto-fill
         if self._has_captcha(page):
             session.status = "waiting_captcha"
@@ -436,7 +440,209 @@ class FormAgentService:
         except Exception as e:
             logger.warning(f"[FormAgent] AI field mapping failed: {e}")
 
-    def _discover_fields(self, page: Page) -> List[Dict]:
+    def _auto_upload_documents(self, session: FormFillingSession):
+        """
+        Auto-upload documents from user's document vault to file input fields.
+        Detects file upload fields, matches them to user's documents, and uploads.
+        """
+        page = session._page
+        if not page:
+            logger.warning("[FormAgent] _auto_upload_documents: no page")
+            return
+
+        try:
+            # Find all file input fields on the page
+            file_inputs = page.query_selector_all('input[type="file"]')
+            if not file_inputs:
+                logger.info("[FormAgent] No file upload fields found on page")
+                return
+
+            logger.info(f"[FormAgent] Found {len(file_inputs)} file upload fields")
+
+            # Get user's documents from DynamoDB
+            from app.services.dynamodb_service import db
+            user_docs = db.get_user_documents(session.user_id)
+            if not user_docs:
+                logger.warning(f"[FormAgent] User {session.user_id} has no uploaded documents")
+                self._send_update(session, {
+                    "status": "filling",
+                    "message": "No documents found in vault. Please upload documents first.",
+                })
+                return
+
+            logger.info(f"[FormAgent] User has {len(user_docs)} documents in vault")
+
+            # Process each file input field
+            for i, file_input in enumerate(file_inputs):
+                try:
+                    # Get field metadata
+                    name_attr = file_input.get_attribute("name") or ""
+                    id_attr = file_input.get_attribute("id") or ""
+                    accept_attr = file_input.get_attribute("accept") or ""
+                    
+                    # Try to find associated label
+                    label_text = ""
+                    try:
+                        if id_attr:
+                            label = page.query_selector(f'label[for="{id_attr}"]')
+                            if label:
+                                label_text = label.inner_text().strip()
+                        
+                        # Fallback: find nearest label
+                        if not label_text:
+                            parent = file_input.evaluate_handle("el => el.closest('div, fieldset, td')")
+                            if parent:
+                                label = parent.query_selector("label")
+                                if label:
+                                    label_text = label.inner_text().strip()
+                    except Exception:
+                        pass
+
+                    field_identifier = label_text or name_attr or id_attr or f"file_field_{i}"
+                    logger.info(f"[FormAgent] Processing file field: '{field_identifier}' (accept: {accept_attr})")
+
+                    # Match field to document type
+                    matched_doc = self._match_document_to_field(field_identifier, accept_attr, user_docs)
+                    
+                    if not matched_doc:
+                        logger.warning(f"[FormAgent] No matching document found for field '{field_identifier}'")
+                        continue
+
+                    # Download document from S3 to temp file
+                    doc_type = matched_doc.get("document_type", "unknown")
+                    s3_key = matched_doc.get("s3_key")
+                    original_filename = matched_doc.get("original_filename", "document.pdf")
+                    
+                    if not s3_key:
+                        logger.warning(f"[FormAgent] Document {matched_doc.get('document_id')} has no S3 key")
+                        continue
+
+                    logger.info(f"[FormAgent] Uploading {doc_type} document: {original_filename}")
+
+                    # Download from S3
+                    from app.services.s3_service import s3_service
+                    import tempfile
+                    
+                    file_content = s3_service.download_file(s3_key)
+                    
+                    # Save to temp file with unique name
+                    suffix = os.path.splitext(original_filename)[1] or ".pdf"
+                    temp_fd = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="civicbridge_")
+                    temp_path = temp_fd.name
+                    temp_fd.write(file_content)
+                    temp_fd.close()
+
+                    # Scroll to file input and highlight
+                    file_input.scroll_into_view_if_needed()
+                    page.wait_for_timeout(200)
+                    
+                    # Highlight in cyan before upload
+                    page.evaluate(
+                        "(el) => { el.style.outline='3px solid #00FFFF'; el.style.boxShadow='0 0 8px #00FFFF'; }",
+                        file_input
+                    )
+                    page.wait_for_timeout(300)
+
+                    # Upload file using Playwright
+                    file_input.set_input_files(temp_path)
+                    page.wait_for_timeout(500)
+
+                    # Turn green after successful upload
+                    page.evaluate(
+                        "(el) => { el.style.outline=''; el.style.boxShadow=''; el.style.backgroundColor='#e8f5e9'; }",
+                        file_input
+                    )
+
+                    # Clean up temp file
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+
+                    # Update session
+                    session.collected_fields[f"document_{doc_type}"] = original_filename
+                    
+                    self._send_update(session, {
+                        "status": "filling",
+                        "message": f"Uploaded {doc_type} document",
+                        "newly_filled": [f"document_{doc_type}"],
+                        "filled_fields": session.collected_fields,
+                    })
+                    self._send_screenshot(session)
+                    
+                    logger.info(f"[FormAgent] Successfully uploaded {doc_type} to field '{field_identifier}'")
+
+                except Exception as e:
+                    logger.error(f"[FormAgent] Failed to upload document to field {i}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"[FormAgent] _auto_upload_documents error: {e}")
+
+    def _match_document_to_field(self, field_label: str, accept_attr: str, user_docs: List[Dict]) -> Optional[Dict]:
+        """
+        Match a file upload field to a user's document based on field label and accept attribute.
+        
+        Args:
+            field_label: Label text or field name (e.g., "Upload Aadhaar Card", "Income Certificate")
+            accept_attr: HTML accept attribute (e.g., "application/pdf", "image/*")
+            user_docs: List of user's uploaded documents
+            
+        Returns:
+            Matched document dict or None
+        """
+        label_lower = field_label.lower()
+        
+        # Document type keyword mappings
+        doc_keywords = {
+            "aadhaar": ["aadhaar", "aadhar", "uid", "identity card", "id card"],
+            "pan": ["pan", "pan card", "permanent account"],
+            "voter_id": ["voter", "voter id", "election card", "epic"],
+            "passport": ["passport"],
+            "driving_license": ["driving", "license", "dl", "driving licence"],
+            "income_certificate": ["income", "income certificate", "income proof"],
+            "caste_certificate": ["caste", "caste certificate", "community certificate"],
+            "domicile_certificate": ["domicile", "residence certificate", "residential"],
+            "birth_certificate": ["birth", "birth certificate", "dob certificate"],
+            "bank_passbook": ["bank", "passbook", "bank statement", "bank account"],
+            "marksheet_10th": ["10th", "tenth", "sslc", "matriculation", "class 10"],
+            "marksheet_12th": ["12th", "twelfth", "hsc", "intermediate", "class 12"],
+            "degree_certificate": ["degree", "graduation", "diploma", "certificate"],
+            "disability_certificate": ["disability", "handicap", "pwd"],
+            "ration_card": ["ration", "ration card", "food card"],
+            "land_record": ["land", "property", "land record", "7/12", "khata"],
+        }
+        
+        # Try to match based on keywords in label
+        for doc_type, keywords in doc_keywords.items():
+            if any(kw in label_lower for kw in keywords):
+                # Find user's document of this type
+                for doc in user_docs:
+                    if doc.get("document_type") == doc_type:
+                        # Check if document format matches accept attribute
+                        if accept_attr:
+                            content_type = doc.get("content_type", "")
+                            # Check if document type is accepted
+                            if "pdf" in accept_attr.lower() and "pdf" not in content_type.lower():
+                                continue
+                            if "image" in accept_attr.lower() and "image" not in content_type.lower():
+                                continue
+                        return doc
+        
+        # Fallback: if label contains generic terms like "document", "upload", "attach"
+        # and we couldn't match specifically, return the first identity document
+        generic_terms = ["document", "upload", "attach", "file", "proof"]
+        if any(term in label_lower for term in generic_terms):
+            # Priority order: Aadhaar > PAN > Voter ID > others
+            priority_types = ["aadhaar", "pan", "voter_id", "passport", "driving_license"]
+            for doc_type in priority_types:
+                for doc in user_docs:
+                    if doc.get("document_type") == doc_type:
+                        return doc
+        
+        return None
+
+    def _discover_fields(self, page):
         """
         Discover all input fields on the current page.
         Strategy:
@@ -716,38 +922,126 @@ class FormAgentService:
         page.wait_for_timeout(1000)
         return {"success": True, "url": page.url, "title": page.title()}
 
+    def _get_validation_errors(self, page: Page) -> list:
+        """Collect visible validation error messages from the current page."""
+        try:
+            return page.evaluate("""
+                () => {
+                    const msgs = [];
+                    const sels = ['.invalid-feedback','.field-error','.error-message','.error',
+                        '.text-danger','.alert-danger','.help-block','[role="alert"]',
+                        '.validation-error','.form-error','.tooltip','.popover-body'];
+                    sels.forEach(s => document.querySelectorAll(s).forEach(el => {
+                        if (!el.offsetParent) return;
+                        const t = el.textContent.trim();
+                        if (t && t.length > 3) msgs.push(t.slice(0,120));
+                    }));
+                    document.querySelectorAll('input,select,textarea').forEach(el => {
+                        if (el.validationMessage && !el.validity.valid) {
+                            const lbl = el.id ? document.querySelector('label[for="'+el.id+'"]') : null;
+                            const nm = lbl ? lbl.textContent.trim() : el.name || el.id || 'field';
+                            msgs.push(nm + ': ' + el.validationMessage.slice(0,100));
+                        }
+                    });
+                    return [...new Set(msgs)].slice(0,10);
+                }
+            """)
+        except Exception:
+            return []
+
     def _act_click(self, page: Page, session: FormFillingSession, p: Dict) -> Dict:
+        import re as _re
         selector = p.get("selector")
         text = p.get("text")
+
+        def _do_click(el_or_loc):
+            try:
+                el_or_loc.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            page.wait_for_timeout(150)
+            el_or_loc.click()
+            page.wait_for_timeout(500)  # wait for validation/navigation
+
+        url_before = page.url
+
         if selector:
             el = page.query_selector(selector)
-            if not el:
-                return {"success": False, "error": f"Element not found: {selector}"}
-            el.scroll_into_view_if_needed()
-            page.wait_for_timeout(200)
-            el.click()
-            page.wait_for_timeout(500)
-            return {"success": True, "clicked": selector}
-        elif text:
-            for strat in [
-                f'button:has-text("{text}")',
-                f'a:has-text("{text}")',
-                f'[role="button"]:has-text("{text}")',
-                f'input[value="{text}"]',
-                f'label:has-text("{text}")',
-            ]:
+            if el:
+                _do_click(el)
+                # Detect if page changed (navigation) or stayed (validation failed)
+                if page.url == url_before:
+                    errs = self._get_validation_errors(page)
+                    if errs:
+                        return {"success": True, "clicked": selector, "validation_errors": errs,
+                                "warning": "Page did not change after click — form validation blocked submission. Errors: " + " | ".join(errs)}
+                return {"success": True, "clicked": selector}
+            # selector not found — treat it as text fallback
+            text = text or selector
+
+        if text:
+            # Build list of texts to try: original, arrow-stripped, first word
+            clean = _re.sub(r'[\u2190-\u21ff\u2192\u2190\u00bb\u00ab\u203a\u2039\xbb\xab→←»«›‹]', '', text).strip()
+            first_word = clean.split()[0] if clean.split() else clean
+            texts = list(dict.fromkeys(t for t in [text, clean, first_word] if t))
+
+            for t in texts:
+                for strat in [
+                    f'button:has-text("{t}")',
+                    f'a:has-text("{t}")',
+                    f'[role="button"]:has-text("{t}")',
+                    f'input[type="submit"][value*="{t}"]',
+                    f'input[type="button"][value*="{t}"]',
+                    f'input[value="{t}"]',
+                    f'[type="submit"]:has-text("{t}")',
+                    f'label:has-text("{t}")',
+                ]:
+                    try:
+                        loc = page.locator(strat).first
+                        if loc.count() > 0 and loc.is_visible():
+                            _do_click(loc)
+                            return {"success": True, "clicked_text": text}
+                    except Exception:
+                        continue
+
+            # Last resort: scan all buttons/links and match by contained text
+            keywords = [w.lower() for w in clean.split() if len(w) > 2]
+            if keywords:
                 try:
-                    loc = page.locator(strat).first
-                    if loc.count() > 0 and loc.is_visible():
-                        loc.scroll_into_view_if_needed()
-                        page.wait_for_timeout(200)
-                        loc.click()
-                        page.wait_for_timeout(500)
-                        return {"success": True, "clicked_text": text}
+                    candidates = page.query_selector_all(
+                        'button, input[type="submit"], input[type="button"], a, [role="button"]'
+                    )
+                    for btn in candidates:
+                        try:
+                            btn_text = (btn.text_content() or btn.get_attribute("value") or "").strip().lower()
+                            if any(kw in btn_text for kw in keywords) and btn.is_visible():
+                                _do_click(btn)
+                                if page.url == url_before:
+                                    errs = self._get_validation_errors(page)
+                                    if errs:
+                                        return {"success": True, "clicked_text": text, "matched": btn_text, "validation_errors": errs,
+                                                "warning": "Page did not change — form validation blocked submission. Errors: " + " | ".join(errs)}
+                                return {"success": True, "clicked_text": text, "matched": btn_text}
+                        except Exception:
+                            continue
                 except Exception:
-                    continue
-            return {"success": False, "error": f"No clickable element with text: '{text}'"}
+                    pass
+
+            return {"success": False, "error": f"No clickable element with text: '{text}'. Use browser_read_screen to find the exact button selector and try with that."}
         return {"success": False, "error": "Provide 'selector' or 'text' to click"}
+
+    @staticmethod
+    def _to_iso_date(text: str) -> Optional[str]:
+        """Convert DD/MM/YYYY, DD-MM-YYYY, or YYYY-MM-DD to YYYY-MM-DD for HTML date inputs."""
+        import re as _re
+        text = text.strip()
+        if _re.match(r'^\d{4}-\d{2}-\d{2}$', text):
+            return text
+        m = _re.match(r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$', text)
+        if m:
+            d, mo, y = m.group(1), m.group(2), m.group(3)
+            return f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+        return None
 
     def _act_type(self, page: Page, session: FormFillingSession, p: Dict) -> Dict:
         text = p.get("text", "")
@@ -758,16 +1052,36 @@ class FormAgentService:
             if not el:
                 return {"success": False, "error": f"Element not found: {selector}"}
             el.scroll_into_view_if_needed()
+
+            # Special handling for HTML date pickers (input[type=date])
+            el_type = (el.get_attribute("type") or "").lower()
+            if el_type == "date":
+                iso = self._to_iso_date(text) or text
+                # Set via JavaScript — most reliable way to fill date inputs
+                page.evaluate(
+                    """([sel, val]) => {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                        }
+                    }""",
+                    [selector, iso]
+                )
+                page.wait_for_timeout(300)
+                return {"success": True, "typed": iso}
+
             el.click()
             if clear_first:
                 el.fill("")
-            page.keyboard.type(text, delay=30)
+            page.keyboard.type(text, delay=15)
         else:
             if clear_first:
                 page.keyboard.press("Control+a")
                 page.keyboard.press("Backspace")
-            page.keyboard.type(text, delay=30)
-        page.wait_for_timeout(200)
+            page.keyboard.type(text, delay=15)
+        page.wait_for_timeout(100)
         return {"success": True, "typed": text[:50]}
 
     def _act_scroll(self, page: Page, session: FormFillingSession, p: Dict) -> Dict:
@@ -781,6 +1095,12 @@ class FormAgentService:
 
     def _act_press_key(self, page: Page, session: FormFillingSession, p: Dict) -> Dict:
         key = p.get("key", "Enter")
+        # Block keys that could reload or navigate away from the form
+        blocked_keys = {"F5", "F12", "Control+r", "Control+R", "Control+l", "Control+L",
+                        "Control+w", "Control+W", "Alt+F4", "Alt+Left", "Alt+Right",
+                        "Control+F5", "Control+Shift+r", "Control+Shift+R"}
+        if key in blocked_keys:
+            return {"success": False, "error": f"Key '{key}' is blocked to prevent page reload/navigation."}
         page.keyboard.press(key)
         page.wait_for_timeout(500)
         return {"success": True, "key": key}
@@ -835,15 +1155,42 @@ class FormAgentService:
                     if (!el.offsetParent && el.type !== 'hidden') return;
                     const lbl = el.id ? document.querySelector('label[for="'+el.id+'"]') : null;
                     const label = lbl ? lbl.textContent.trim() : el.placeholder || el.name || el.id || '';
+                    const isCheck = el.type === 'checkbox' || el.type === 'radio';
                     r.inputs.push({
                         selector: el.id ? '#'+el.id : el.name ? '[name="'+el.name+'"]' : 'input:nth-of-type('+(i+1)+')',
                         type: el.type || 'text',
                         label: label.slice(0, 60),
-                        value: el.value ? el.value.slice(0, 40) : '',
+                        value: isCheck ? (el.checked ? 'checked' : 'unchecked') : (el.value ? el.value.slice(0, 40) : ''),
+                        checked: isCheck ? el.checked : undefined,
                         placeholder: (el.placeholder || '').slice(0, 40)
                     });
                 });
                 r.inputs = r.inputs.slice(0, 30);
+                // Collect visible validation / error messages on the page
+                r.validation_errors = [];
+                const errSelectors = [
+                    '.invalid-feedback', '.field-error', '.error-message', '.error',
+                    '.text-danger', '.alert-danger', '.help-block', '[role="alert"]',
+                    '[aria-invalid="true"]', '.validation-error', '.form-error',
+                    '.tooltip', '.popover-body'
+                ];
+                errSelectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(el => {
+                        if (!el.offsetParent) return;
+                        const t = el.textContent.trim();
+                        if (t && t.length > 3) r.validation_errors.push(t.slice(0, 120));
+                    });
+                });
+                // Also check browser-native HTML5 validation messages
+                document.querySelectorAll('input, select, textarea').forEach(el => {
+                    if (el.validationMessage && !el.validity.valid) {
+                        const lbl2 = el.id ? document.querySelector('label[for="'+el.id+'"]') : null;
+                        const nm = lbl2 ? lbl2.textContent.trim() : el.name || el.id || 'field';
+                        r.validation_errors.push(nm + ': ' + el.validationMessage.slice(0, 100));
+                    }
+                });
+                // Deduplicate
+                r.validation_errors = [...new Set(r.validation_errors)].slice(0, 10);
                 document.querySelectorAll('select').forEach((el, i) => {
                     if (!el.offsetParent) return;
                     const lbl = el.id ? document.querySelector('label[for="'+el.id+'"]') : null;
@@ -857,15 +1204,19 @@ class FormAgentService:
                     });
                 });
                 r.selects = r.selects.slice(0, 15);
-                document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]').forEach(el => {
+                document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]').forEach((el, i) => {
                     if (!el.offsetParent) return;
                     const txt = (el.textContent || el.value || '').trim();
                     if (!txt) return;
-                    r.buttons.push({
-                        selector: el.id ? '#'+el.id : el.name ? '[name="'+el.name+'"]' : null,
-                        text: txt.slice(0, 50),
-                        type: el.type || 'button'
-                    });
+                    let sel = null;
+                    if (el.id) sel = '#' + el.id;
+                    else if (el.name) sel = '[name="' + el.name + '"]';
+                    else if (el.className) {
+                        const classes = [...el.classList].filter(c => c && c.length > 2);
+                        if (classes.length) sel = el.tagName.toLowerCase() + '.' + classes[0];
+                    }
+                    if (!sel) sel = el.tagName.toLowerCase() + ':nth-of-type(' + (i+1) + ')';
+                    r.buttons.push({ selector: sel, text: txt.slice(0, 60), type: el.type || 'button' });
                 });
                 r.buttons = r.buttons.slice(0, 15);
                 document.querySelectorAll('a[href]').forEach(el => {
@@ -886,77 +1237,41 @@ class FormAgentService:
             return {"success": False, "error": str(e), "url": page.url, "title": page.title()}
 
     async def _periodic_screenshot_loop(self, session: FormFillingSession):
-        """Background task: stream screenshots every ~750ms so the live view stays current."""
+        """Background task: stream screenshots every ~1s so the live view stays current."""
         try:
             while True:
-                await asyncio.sleep(0.75)
+                await asyncio.sleep(1.0)
                 if not session._page or session.status in ("error", "idle"):
                     break
+                # Skip if a screenshot is already in-flight (prevent pile-up)
+                if getattr(session, '_screenshot_in_flight', False):
+                    continue
                 try:
+                    session._screenshot_in_flight = True
                     await asyncio.get_running_loop().run_in_executor(
                         _pw_executor, self._send_screenshot, session
                     )
                 except Exception:
                     pass
+                finally:
+                    session._screenshot_in_flight = False
         except asyncio.CancelledError:
             pass
-
-    def _scroll_captcha_into_view(self, page: Page):
-        """Try to find a CAPTCHA element on the page and scroll it into the viewport."""
-        try:
-            found = page.evaluate("""() => {
-                // Look for captcha images, inputs, or containers
-                const selectors = [
-                    'img[src*="captcha" i]', 'img[alt*="captcha" i]', 'img[id*="captcha" i]',
-                    'img[class*="captcha" i]', 'img[src*="Captcha" i]',
-                    'input[name*="captcha" i]', 'input[id*="captcha" i]',
-                    'input[placeholder*="captcha" i]',
-                    '[class*="captcha" i]', '[id*="captcha" i]',
-                    'canvas[id*="captcha" i]', 'canvas[class*="captcha" i]',
-                ];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.offsetParent !== null) {
-                        el.scrollIntoView({ behavior: 'instant', block: 'center' });
-                        return true;
-                    }
-                }
-                // Fallback: scroll to the very bottom where CAPTCHAs usually appear
-                window.scrollTo(0, document.body.scrollHeight);
-                return false;
-            }""")
-            page.wait_for_timeout(300)
-            return found
-        except Exception as e:
-            logger.debug(f"[FormAgent] _scroll_captcha_into_view error: {e}")
-            return False
-
-    async def scroll_to_captcha(self, user_id: str) -> bool:
-        """Public async method: scroll captcha into view for a user's session."""
-        session = self.get_session(user_id)
-        if not session or not session._page:
-            return False
-        return await asyncio.get_running_loop().run_in_executor(
-            _pw_executor, self._scroll_captcha_into_view, session._page
-        )
 
     def _send_screenshot(self, session: FormFillingSession):
         """Capture page screenshot and stream to frontend as base64 JPEG."""
         if not session._page or not session._websocket or not self._loop:
             return
         try:
-            # When waiting for CAPTCHA, ensure it's scrolled into the viewport
-            if session.waiting_for == "captcha":
-                self._scroll_captcha_into_view(session._page)
-            img_bytes = session._page.screenshot(type="jpeg", quality=55)
+            img_bytes = session._page.screenshot(type="jpeg", quality=45)
             import base64
             b64 = base64.b64encode(img_bytes).decode("ascii")
             payload = {"type": "form_screenshot", "data": f"data:image/jpeg;base64,{b64}"}
-            future = asyncio.run_coroutine_threadsafe(
+            # Fire-and-forget: don't block the playwright thread waiting for WS send
+            asyncio.run_coroutine_threadsafe(
                 session._websocket.send_json(payload),
                 self._loop,
             )
-            future.result(timeout=5)
         except Exception as e:
             logger.debug(f"[FormAgent] Screenshot send failed: {e}")
 
@@ -981,12 +1296,11 @@ class FormAgentService:
             },
         }
         try:
-            future = asyncio.run_coroutine_threadsafe(
+            # Fire-and-forget: don't block the playwright thread
+            asyncio.run_coroutine_threadsafe(
                 session._websocket.send_json(payload),
                 self._loop,
             )
-            # Wait briefly for the send to complete so errors surface
-            future.result(timeout=5)
             logger.debug(f"[FormAgent] Sent form_update: fields_filled={data.get('fields_filled')}, total={data.get('total_fields')}")
         except Exception as e:
             logger.error(f"[FormAgent] _send_update failed: {e}")

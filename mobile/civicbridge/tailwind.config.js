@@ -1,0 +1,113 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        saffron: {
+          50:  '#fff8f0',
+          100: '#ffecd6',
+          200: '#ffd6a8',
+          300: '#ffba70',
+          400: '#ff9933',
+          500: '#ff7f00',
+          600: '#e06600',
+          700: '#b84f00',
+          800: '#8f3f06',
+          900: '#6f3309',
+        },
+        'india-green': {
+          50:  '#f0fdf4',
+          100: '#dcfce7',
+          200: '#a7f3c0',
+          300: '#6ee7a0',
+          400: '#3cd882',
+          500: '#138808',
+          600: '#106c07',
+          700: '#0d5506',
+          800: '#0a4005',
+          900: '#083104',
+        },
+        navy: {
+          50:  '#eff0ff',
+          100: '#dce0ff',
+          200: '#b8c0ff',
+          300: '#8090ff',
+          400: '#4060ff',
+          500: '#0040ff',
+          600: '#0030cc',
+          700: '#002499',
+          800: '#001a80',
+          900: '#000080',
+        },
+        success: { DEFAULT: '#22C55E', light: '#dcfce7', dark: '#166534' },
+        warning: { DEFAULT: '#F59E0B', light: '#fef3c7', dark: '#92400e' },
+        error:   { DEFAULT: '#EF4444', light: '#fee2e2', dark: '#991b1b' },
+        info:    { DEFAULT: '#3B82F6', light: '#dbeafe', dark: '#1e3a8a' },
+      },
+      fontFamily: {
+        sans: [
+          'Noto Sans',
+          'Noto Sans Devanagari',
+          'Noto Sans Tamil',
+          'system-ui',
+          '-apple-system',
+          'sans-serif',
+        ],
+      },
+      fontSize: {
+        xs:    ['0.875rem', { lineHeight: '1.4' }],
+        sm:    ['1rem',     { lineHeight: '1.5' }],
+        base:  ['1.125rem', { lineHeight: '1.6' }],
+        lg:    ['1.25rem',  { lineHeight: '1.5' }],
+        xl:    ['1.5rem',   { lineHeight: '1.4' }],
+        '2xl': ['1.875rem', { lineHeight: '1.3' }],
+        '3xl': ['2.25rem',  { lineHeight: '1.2' }],
+      },
+      borderRadius: {
+        sm: '0.5rem',
+        md: '0.75rem',
+        lg: '1rem',
+        xl: '1.5rem',
+      },
+      spacing: { safe: 'env(safe-area-inset-bottom)' },
+      boxShadow: {
+        card:            '0 2px 12px 0 rgba(0,0,0,0.08)',
+        'card-hover':    '0 8px 24px 0 rgba(0,0,0,0.14)',
+        orb:             '0 0 40px rgba(255,153,51,0.4)',
+        'orb-listening': '0 0 60px rgba(19,136,8,0.5)',
+      },
+      animation: {
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4,0,0.6,1) infinite',
+        'spin-slow':  'spin 3s linear infinite',
+        shimmer:      'shimmer 1.5s infinite',
+        ripple:       'ripple 0.6s linear',
+        float:        'float 3s ease-in-out infinite',
+        'wave-bar':   'waveBar 1.2s ease-in-out infinite',
+      },
+      keyframes: {
+        shimmer: {
+          '0%':   { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
+        },
+        ripple: {
+          '0%':   { transform: 'scale(0)', opacity: '1' },
+          '100%': { transform: 'scale(4)', opacity: '0' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%':      { transform: 'translateY(-8px)' },
+        },
+        waveBar: {
+          '0%, 100%': { transform: 'scaleY(0.3)' },
+          '50%':      { transform: 'scaleY(1)' },
+        },
+      },
+      screens: { xs: '360px' },
+      maxWidth: { content: '480px' },
+    },
+  },
+  plugins: [require('@tailwindcss/forms')],
+};
+

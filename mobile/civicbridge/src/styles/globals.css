@@ -1,0 +1,190 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base ──────────────────────────────────────────────── */
+@layer base {
+  :root {
+    --bottom-safe: env(safe-area-inset-bottom, 0px);
+    --top-safe:    env(safe-area-inset-top,    0px);
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    font-family: 'Noto Sans', 'Noto Sans Devanagari', 'Noto Sans Tamil', system-ui, -apple-system, sans-serif;
+    min-height: 100dvh;
+    overscroll-behavior: none;
+  }
+
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    box-sizing: border-box;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-saffron-400;
+  }
+
+  button, [role="button"] {
+    min-height: 48px;
+    min-width: 48px;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+}
+
+/* ─── Components ─────────────────────────────────────────── */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-md bg-saffron-400 px-6 py-3 text-base font-semibold text-white transition-all duration-150 active:scale-95 hover:bg-saffron-500 focus-visible:ring-2 focus-visible:ring-saffron-400 focus-visible:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    min-height: 52px;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border-2 border-saffron-400 bg-white px-6 py-3 text-base font-semibold text-saffron-500 transition-all duration-150 active:scale-95 hover:bg-saffron-50 disabled:opacity-50;
+    min-height: 52px;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-slate-600 transition-all duration-150 hover:bg-slate-100 active:scale-95;
+    min-height: 48px;
+  }
+
+  .btn-success {
+    @apply inline-flex items-center justify-center gap-2 rounded-md bg-india-green-500 px-6 py-3 text-base font-semibold text-white transition-all duration-150 active:scale-95 hover:bg-india-green-600;
+    min-height: 52px;
+  }
+
+  .card {
+    @apply rounded-lg bg-white shadow-card border border-slate-100;
+  }
+
+  .card-interactive {
+    @apply card transition-shadow duration-200 cursor-pointer active:scale-[0.98] hover:shadow-card-hover;
+  }
+
+  .input-base {
+    @apply w-full rounded-md border-2 border-slate-200 bg-white px-4 py-3 text-base text-slate-900 transition-colors placeholder:text-slate-400 focus:border-saffron-400 focus:outline-none disabled:bg-slate-50 disabled:text-slate-400;
+    min-height: 52px;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded-md bg-slate-200;
+  }
+
+  .page-container {
+    @apply mx-auto max-w-content px-4 pb-[calc(80px+var(--bottom-safe))];
+  }
+
+  .section-title {
+    @apply text-xl font-bold text-slate-900;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition-colors cursor-pointer whitespace-nowrap;
+    min-height: 40px;
+  }
+
+  .chip-active {
+    @apply chip border-saffron-400 bg-saffron-50 text-saffron-600;
+  }
+}
+
+/* ─── Utilities ──────────────────────────────────────────── */
+@layer utilities {
+  .safe-bottom  { padding-bottom: var(--bottom-safe); }
+  .safe-top     { padding-top:    var(--top-safe);    }
+
+  .text-gradient-saffron {
+    @apply bg-gradient-to-r from-saffron-400 to-saffron-600 bg-clip-text text-transparent;
+  }
+
+  .text-gradient-india {
+    background: linear-gradient(135deg, #FF9933 0%, #138808 50%, #000080 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .bg-india-flag {
+    background: linear-gradient(180deg, #FF9933 33.3%, #FFFFFF 33.3% 66.6%, #138808 66.6%);
+  }
+
+  .shimmer-bg {
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+
+  .no-bounce { overscroll-behavior: none; }
+
+  .glass {
+    backdrop-filter: blur(12px);
+    background: rgba(255, 255, 255, 0.85);
+  }
+}
+
+/* ─── Dark Mode ──────────────────────────────────────────── */
+.dark body {
+  @apply bg-slate-900 text-slate-100;
+}
+
+.dark .card {
+  @apply bg-slate-800 border-slate-700;
+}
+
+/* ─── Animations ─────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+/* Page transition */
+.page-enter {
+  opacity: 0;
+  transform: translateX(16px);
+}
+.page-enter-active {
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 250ms ease, transform 250ms ease;
+}
+.page-exit {
+  opacity: 1;
+}
+.page-exit-active {
+  opacity: 0;
+  transform: translateX(-16px);
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+/* Ripple */
+.ripple-container {
+  position: relative;
+  overflow: hidden;
+}
+.ripple-container::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.4);
+  transform: scale(0);
+  animation: ripple 0.6s linear;
+  pointer-events: none;
+}
