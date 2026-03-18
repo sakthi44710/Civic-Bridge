@@ -1206,55 +1206,18 @@ AWS_SECRET_ACCESS_KEY=<your-secret>
 
 ---
 
-## 📞 Support
-
-- **Email**: support@civicbridge.in
-- **Phone**: +91-XXXXXXXXXX
-- **Website**: https://civicbridge.in
-- **Documentation**: https://docs.civicbridge.in
-
----
-
-## 📄 License
+## � License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## � Acknowledgments
 
 - **AWS** for Bedrock, Textract, and cloud infrastructure
 - **Sarvam AI** for Indian language STT/TTS models
 - **Government of India** for open data on welfare schemes
 - **Open Source Community** for amazing tools and libraries
-
----
-
-## 🚀 Roadmap
-
-### Q1 2024
-- [x] Voice-first interface with 22 languages
-- [x] Autonomous form filling with Playwright
-- [x] Document intelligence vault
-- [x] 50+ government schemes
-
-### Q2 2024
-- [ ] WhatsApp bot integration
-- [ ] SMS-based interface (no internet required)
-- [ ] DigiLocker integration
-- [ ] Aadhaar e-KYC
-
-### Q3 2024
-- [ ] Mobile app (iOS + Android)
-- [ ] Offline mode with sync
-- [ ] Multi-user family accounts
-- [ ] Advanced analytics dashboard
-
-### Q4 2024
-- [ ] Government portal API integrations
-- [ ] Blockchain document verification
-- [ ] AI-powered eligibility prediction
-- [ ] Video call support
 
 ---
 
