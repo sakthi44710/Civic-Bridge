@@ -373,22 +373,61 @@ User Hears Response
 ### Voice Activity Detection (VAD)
 
 ```javascript
-// Client-side VAD
+// Client-side VAD with noise filtering
+const SILENCE_THRESHOLD = 0.025;      // Higher = less sensitive to silence
+const SILENCE_DURATION_MS = 1200;     // Stop after 1.2s of silence
+const MIN_RECORD_MS = 800;            // Require 800ms of audio before processing
+const MIN_AUDIO_LENGTH = 2000;        // Minimum 2000 bytes to send
+const NOISE_GATE_THRESHOLD = 0.02;    // Minimum RMS level for speech
+
 const analyzeVolume = (audioData) => {
-  const sum = audioData.reduce((acc, val) => acc + Math.abs(val), 0);
-  const average = sum / audioData.length;
-  const volume = Math.min(100, average * 200);
+  // Compute RMS (Root Mean Square) volume
+  const sum = audioData.reduce((acc, val) => acc + val * val, 0);
+  const rms = Math.sqrt(sum / audioData.length);
   
-  if (volume > SILENCE_THRESHOLD) {
-    lastSoundTime = Date.now();
+  // Noise gate: filter out low-level background noise
+  if (rms < NOISE_GATE_THRESHOLD) {
+    consecutiveLowFrames++;
+    if (consecutiveLowFrames > 10 && elapsed > MIN_RECORD_MS) {
+      stopRecording(); // Discard background noise
+      return;
+    }
   }
   
-  if (Date.now() - lastSoundTime > SILENCE_DURATION) {
-    stopRecording();
-    sendAudioToServer();
+  // Silence detection: stop after pause in speech
+  if (rms < SILENCE_THRESHOLD && elapsed > MIN_RECORD_MS) {
+    if (!silenceStart) silenceStart = Date.now();
+    if (Date.now() - silenceStart > SILENCE_DURATION_MS) {
+      stopRecording();
+      sendAudioToServer();
+    }
+  } else if (rms >= NOISE_GATE_THRESHOLD) {
+    silenceStart = null; // Reset silence timer
+  }
+};
+
+// Minimum audio length check before sending
+recorder.onstop = async () => {
+  const audioBlob = new Blob(chunks);
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  
+  if (arrayBuffer.byteLength >= MIN_AUDIO_LENGTH) {
+    // Send to server for transcription
+    websocket.send(arrayBuffer);
+  } else {
+    // Too short - likely background noise, discard
+    console.log('Audio too short, discarding');
+    resumeListening();
   }
 };
 ```
+
+**Features**:
+- **Noise Gate**: Filters out background noise below threshold
+- **Minimum Length**: Rejects audio clips < 2000 bytes
+- **Silence Detection**: Stops recording after 1.2s of silence
+- **Auto-Resume**: Continues listening after discarding noise
+- **Interrupt Handling**: Stops AI speech when user starts speaking
 
 ## Multi-Agent System Design
 
@@ -543,10 +582,63 @@ def fill_field(field: FormField, value: any, page: Page):
             page.uncheck(selector)
     
     elif field.type == 'file':
-        page.set_input_files(selector, value)
+        # NEW: Auto-upload from document vault
+        document = match_document_to_field(field.label, user_documents)
+        if document:
+            # Download from S3
+            file_content = s3_service.download_file(document['s3_key'])
+            temp_path = f"/tmp/{document['original_filename']}"
+            with open(temp_path, 'wb') as f:
+                f.write(file_content)
+            
+            # Upload via Playwright
+            page.set_input_files(selector, temp_path)
+            
+            # Clean up
+            os.remove(temp_path)
+        else:
+            # Document not found - prompt user
+            prompt_user_to_upload(field.label)
     
     # Wait for any dynamic updates
     page.wait_for_timeout(500)
+```
+
+### Document Upload Matching
+
+```python
+def match_document_to_field(field_label: str, user_docs: list) -> dict:
+    """
+    Match file upload field to user's document based on keywords.
+    
+    Examples:
+    - "Upload Aadhaar Card" → aadhaar document
+    - "Income Certificate" → income_certificate document
+    - "10th Marksheet" → marksheet_10th document
+    """
+    label_lower = field_label.lower()
+    
+    # Document type keyword mappings
+    doc_keywords = {
+        "aadhaar": ["aadhaar", "aadhar", "uid", "identity"],
+        "pan": ["pan", "pan card", "permanent account"],
+        "income_certificate": ["income", "income certificate"],
+        "marksheet_10th": ["10th", "tenth", "sslc", "matriculation"],
+        "marksheet_12th": ["12th", "twelfth", "hsc", "intermediate"],
+        "bank_passbook": ["bank", "passbook", "bank statement"],
+        "caste_certificate": ["caste", "community certificate"],
+        "land_record": ["land", "property", "7/12", "khata"],
+        # ... more mappings
+    }
+    
+    # Find matching document
+    for doc_type, keywords in doc_keywords.items():
+        if any(kw in label_lower for kw in keywords):
+            for doc in user_docs:
+                if doc['document_type'] == doc_type:
+                    return doc
+    
+    return None
 ```
 
 ## Document Processing Pipeline

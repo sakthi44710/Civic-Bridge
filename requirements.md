@@ -20,10 +20,12 @@
 
 **FR-1.1**: Voice Input
 - Support speech-to-text in 22 Indian languages
-- Real-time voice activity detection (VAD)
+- Real-time voice activity detection (VAD) with noise filtering
 - Handle code-mixing (e.g., Hindi-English)
 - Continuous listening mode with silence detection
 - Push-to-talk and tap-to-start modes
+- Background noise rejection (noise gate + minimum audio length)
+- Interrupt handling (stop AI when user speaks)
 
 **FR-1.2**: Voice Output
 - Text-to-speech in user's selected language
@@ -121,7 +123,10 @@
 - Navigate multi-step forms
 - Fill fields automatically
 - Handle dropdowns, radio buttons, checkboxes
-- Upload documents when required
+- **Auto-upload documents from vault when form requires file uploads**
+- Detect file input fields and match to user's documents
+- Download from S3 and upload via Playwright
+- Support multiple file uploads per form
 
 **FR-5.2**: Live Viewport Streaming
 - Stream browser screenshots to user
